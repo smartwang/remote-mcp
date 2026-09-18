@@ -481,13 +481,17 @@ DCR 路径有一条运维红线（官方文档明说）：**已注册的 client 
 ChatGPT 每个 connector 连接只注册一次并长期复用，我们若把记录清掉，用户和审核者
 会直接收到 `invalid_client`。
 
-**当前状态（2026-09-18）：`docker/.env` 里 `MCP_EXTRA_HEADERS` 仍然是活的。**
-因为 ChatGPT 那边还在用「无身份验证 + 隧道注入静态令牌」那套，OAuth 那一步还没在
-ChatGPT 里走过一次。切换的**顺序**是有讲究的，反过来会有一段谁也连不上的空档：
+**关于隧道路径的切换顺序**（正式生产**不走**这条路，见本节末）：
+
+生产形态是「中继直接挂公网 + connector 走 OAuth」（[`../deploy/server/README.md`](../deploy/server/README.md)），
+链路上**根本没有隧道**，所以不存在下面这个问题。但如果你还在用隧道形态
+（[`../docker/README.md`](../docker/README.md)），从静态令牌切到 OAuth 是有顺序讲究的 ——
+反过来会有一段谁也连不上的空档：
 
 1. 先在中继这边把 OAuth 立起来（已完成：端点、DCR、授权页、撤销都在跑）。
 2. 再在 ChatGPT 的 connector 里把身份验证改成 **OAuth**，走完一次授权，确认能调用。
 3. **最后**才把 `docker/.env` 里的 `MCP_EXTRA_HEADERS` 注释掉、重建隧道容器。
+   ⚠️ 该变量在 `docker/.env` 里**目前仍然是活的**（那条路径只是保留着）。
 
 第 3 步必须在第 2 步**验证通过之后**做。理由是这两者的优先级没有实测过：
 如果隧道注入的静态头排在 connector 转发来的 `Authorization` **之后**，
@@ -850,14 +854,6 @@ HTTP 面上故意不开放，客户端不该能伪造设备。用完连派发行
 
 ### 尚未验证
 
-- **由 ChatGPT 真实触发的一次工具调用。** 到中继这一段用真令牌验过（隧道容器启动探测
-  让 `mcp_api_tokens.last_used_at` 前进了），但那是 `initialize` 探测，不是一次人工触发的
-  `tools/call`。
-- **ChatGPT 侧真的走完 OAuth。** 中继这一侧的完整链路已用模拟客户端验过，但
-  "ChatGPT 的 connector 完成 DCR → 授权 → 换令牌"这一环必须由人在 ChatGPT 里点一次才算数。
-  前提见上面的**部署门槛**：授权页得是终端用户浏览器能直接打开的地址。
-  当前 `RELAY_PUBLIC_URL` 还是 `http://127.0.0.1:18086`，**只有在这台机器上的浏览器能打开**
-  —— 拿这个地址去 ChatGPT 配 connector，授权页会打不开。
 - **CIMD 路径完全没有实现**（见上面的已知缺口）。当前靠 DCR 回落，功能可用；
   但 DCR 已被规范标为 deprecated，且规范建议授权服务器支持 CIMD。属于**已知未做**，
   不是"已支持"。
@@ -866,16 +862,32 @@ HTTP 面上故意不开放，客户端不该能伪造设备。用完连派发行
   没有实测。
 - **真实的多租户并发**（两个租户同时调用各自的设备）。隔离是逐条验过的，
   但没有做过并发压测。
+- **设备断线重连后的行为**。心跳新鲜窗口 15 分钟（`DEVICE_FRESH_MS`）、
+  广播心跳 5 分钟，但设备进程重启后租户绑定是否稳定，没实测过。
+
+### 已于 2026-09-18 验证（原先列在"尚未验证"里的）
+
+- **ChatGPT 真实触发的一次 `tools/call`** ✅ —— `list_directory`
+  （`C:\Users\<user>\workspace`，depth 1），`created_at` → `completed_at` **2.32 秒**，
+  返回真实目录内容。
+  **判据**：`mcp_remote_calls.tool_args` 里有 **`"origin":"llm"`** —— 脚本调用不带
+  这个标记。注意**别再用 `metadata.client` 当判据**：本次它是
+  `{"relay":true,"client":null,"transport":"relay-broadcast"}`。
+  `last_used_at` 前进**仍然**不等于有真实调用（隧道探测也会让它前进），这条照旧。
+- **ChatGPT 侧真的走完 OAuth** ✅ —— 注册 → 授权 → 换令牌在库里全有据：
+  `oauth.client.register`（client_name = `ChatGPT`）→ 授权码签发 → `oauth.token.issue`。
+  前提「授权页必须公网可达」已满足（`RELAY_PUBLIC_URL` 是公网 HTTPS 域名）。
 
 ## 与隧道版的关系
 
-本中继**不依赖** OpenAI 隧道。三种接法：
+本中继**不依赖** OpenAI 隧道。三种接法，按推荐度排：
 
-- **本机联调**：`tools/call` 直接打 `http://127.0.0.1:18086/mcp`。
-- **接 ChatGPT 网页版（现状）**：隧道把 `MCP_SERVER_URL` 指到
-  `http://relay:18086/mcp`（compose 网络内），connector 的身份验证选「无身份验证」，
-  租户令牌由 `MCP_EXTRA_HEADERS` 静态注入。**这是单租户形态** —— 所有 ChatGPT 用户
-  在中继看来是同一个人。切换成多租户的步骤见「ChatGPT connector 怎么配」。
-- **中继直接挂公网（目标形态）**：去掉隧道，`RELAY_PUBLIC_URL` 指向公网 HTTPS 域名，
-  ChatGPT 的 connector 改成 `Connection = Server URL` 填那个地址，身份验证选 OAuth。
-  这样链路更短，也没有"静态头会不会覆盖 OAuth 头"这个不确定性。
+| # | 接法 | 形态 |
+|---|---|---|
+| 1 | **中继直接挂公网（生产现状）** | 去掉隧道。`RELAY_PUBLIC_URL` 指公网 HTTPS 域名，connector 选 `Connection = Server URL` 填 `<域名>/mcp`，身份验证选 OAuth。链路最短，也没有"静态头会不会覆盖 OAuth 头"这个不确定性。部署见 [`../deploy/server/README.md`](../deploy/server/README.md) |
+| 2 | **本机联调** | `tools/call` 直接打 `http://127.0.0.1:18086/mcp`，无需反代与隧道 |
+| 3 | 容器 + 隧道边车（旧形态） | 隧道把 `MCP_SERVER_URL` 指到 `http://relay:18086/mcp`（compose 网络内），connector 选「无身份验证」，租户令牌由 `MCP_EXTRA_HEADERS` 静态注入。**这是单租户形态** —— 所有 ChatGPT 用户在中继看来是同一个人 |
+
+第 3 种**已不是推荐路径**：静态头是配置期固定的，天生做不到 per-user 身份，
+已被 OAuth 取代。相关代码与 compose profile 仍保留，见
+[`../docker/README.md`](../docker/README.md)。

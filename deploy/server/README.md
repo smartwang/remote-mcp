@@ -20,12 +20,14 @@ relay 不执行任何命令，只做鉴权与派发。真正跑命令的是 Wind
 
 ---
 
-## 本机现状：只差三个文件要你填（2026-09-18）
+## 安装：三个密钥文件 + 四条命令
 
-部署目录 `/root/remote-mcp-relay/` 其余都已就绪 —— compose、`.env`（URL 已填、
-自助注册已关、管理员口令已生成）、admin 令牌、WAF 站点
-（`sites-enabled/IF_backend_4` → `127.0.0.1:18086`）、DNS、镜像、迁移 SQL
-与 `migrate.sh` 都在位。**只差下面三个文件**：
+> **部署状态**：一次完整部署已于 2026-09-18 走通（表已建、relay 健康、
+> device 在线、ChatGPT 侧走完 OAuth 并真实触发过 `tools/call`）。
+> 下面是重新来一遍的步骤。
+
+部署目录（服务器上的 `/root/remote-mcp-relay/`）里，代码之外只有三样东西要你填。
+都是**单行、只放值**：不要引号、不要 `Bearer ` 前缀、不要行尾注释。
 
 | # | 填到哪 | 内容形态 | 从哪拿 |
 |---|---|---|---|
@@ -33,7 +35,6 @@ relay 不执行任何命令，只做鉴权与派发。真正跑命令的是 Wind
 | 2 | `secrets/supabase-secret-key.txt` | `sb_secret_…` | 同一个页签 → Secret keys（点 Reveal 才显示） |
 | 3 | `secrets/supabase-db-url.txt` | 整串 URI | Supabase → **Connect** → **Session pooler** → URI |
 
-三个文件都是**单行、只放值**：不要引号、不要 `Bearer ` 前缀、不要行尾注释。
 第三个只给 `./migrate.sh` 建表用，不会进容器。
 
 > ⚠️ 第 3 个别用 **Direct connection**（`db.<ref>.supabase.co`）—— Supabase 对它
@@ -252,18 +253,26 @@ TLS 证书必须覆盖 `mcp.example.com`。ChatGPT 侧不接受自签名证书�
      `proxy_set_header X-Forwarded-For $http_cf_connecting_ip;`。但它会被
      SafeLine 的界面保存动作覆写，得记着（且不走 CF 时该头为空，要一起想清楚）。
 
-### Cloudflare 橙云：以下均为**未验证**的风险点
+### Cloudflare 橙云：实测结论与注意事项
 
-`mcp.example.com` 目前是橙云（解析到 `104.21.x` / `172.67.x`）。实测已确认
-**回源链路正常**（经 CF 访问 `https://mcp.example.com/` 返回 200，
-`cf-cache-status: DYNAMIC`）。但以下几项没验证过，出问题先怀疑它们：
+生产环境是橙云（解析到 `104.21.x` / `172.67.x`）。**已实测走通的**：
+
+- 回源链路正常 —— 经 CF 访问返回 200，`cf-cache-status: DYNAMIC`。
+- **`/oauth/token` 的 POST 没有被 WAF 或人机验证拦住** —— 授权码 → 换令牌 →
+  拿到 Bearer 令牌整条走通（2026-09-18，且是 ChatGPT 侧真实发起的）。
+- streamable HTTP 没有出现「initialize 成功但后续流断」—— 真实 `tools/call`
+  2.3 秒返回。
+- ChatGPT 的出口 IP 是 **Azure 段（`23.101.217.x`）**，不是 chatgpt.com 的域。
+  看日志时别认错，也别把它当成攻击流量。
+
+仍然要注意的：
 
 - **人机验证 / 拦截**：CF 的 Bot Fight Mode、或 zone 安全级别调到 High 之后，
   非浏览器 UA 的请求（ChatGPT 的 connector 正是）可能被 challenge。若 OAuth
   在 ChatGPT 侧莫名失败而 curl 正常，先查这里。
-- **响应缓冲与长连接**：MCP 走 streamable HTTP。若出现"initialize 成功但后续
-  流断"，试试把这条记录改成 **DNS only（灰云）**，让 CF 只做解析 —— 源站已经有
-  SafeLine 做 TLS 终结，多一层 CF 只是多一个变量。
+- **响应缓冲与长连接**：万一出现「initialize 成功但后续流断」，试试把这条记录
+  改成 **DNS only（灰云）**，让 CF 只做解析 —— 源站已经有 SafeLine 做 TLS 终结，
+  多一层 CF 只是多一个变量。
 - **别让 `/.well-known/*` 与 `/oauth/*` 落进任何缓存规则**。发现文档被缓存后，
   改配置不会立即生效。
 

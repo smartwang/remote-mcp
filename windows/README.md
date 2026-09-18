@@ -1,5 +1,15 @@
 # Windows MCP server —— 让 ChatGPT 直接操作这台 Windows
 
+> **本目录有两个不同的东西，别混：**
+>
+> | 位置 | 是什么 | 用在哪 |
+> |---|---|---|
+> | `server.js` + `start-mcp.cmd`（**本文件讲的主体**） | 7 个受控工具的轻量 MCP server，跑在 Windows 上 | 隧道形态（`../docker/`）。HTTP + 路径 token |
+> | [`relay-device/`](relay-device/README.md) | 让**官方 DesktopCommander device** 接入自建 relay 的启动脚本 | relay 形态（**生产**）。带出原生 26 个工具 |
+>
+> 要「工具全、原生、跟着上游升级」→ 用 `relay-device/`；
+> 要「轻量、只暴露 7 个受控工具、执行面小」→ 用本文件这套。
+
 ## 为什么需要它
 
 容器里**跑不了 Windows 程序**。这不是配置问题，是硬约束 —— 实测确认：
@@ -218,6 +228,11 @@ http://host.docker.internal:18090/t/<MCP_PATH_TOKEN>/mcp
 | 执行体 | DesktopCommander server（25 工具）跑在你机器上 | 本目录的 server.js（7 工具）跑在 Windows 上 |
 | 隔离 | 无，直接是宿主 | 管道在容器里，执行在 Windows |
 | 能否产品化 | 能 | **不能** —— 官方明确不支持公共插件分发，RBAC 是平台组织级的 |
+
+**还有第三条路，在上表之外**：`relay-device/` —— 官方 DesktopCommander device
+直连**自建的** relay（本项目核心，`../relay/`），拿到的是原生 **26 工具**，
+身份是**每个终端用户各自的 OAuth**。它才是"既要工具全、又要能产品化"的那个答案；
+本目录这套 tunnel + 7 工具的定位是**轻量、执行面小**。
 
 想升级工具数量：把 `../docker/.env` 的 `MCP_COMMAND` 换成
 `npx -y @wonderwhy-er/desktop-commander@latest`、`MCP_SERVER_URL` 清空、Windows 侧 server 停掉。

@@ -31,6 +31,8 @@ node ../relay/tools/mint-tunnel-token.js
 #    然后 .env 里设 MCP_EXTRA_HEADERS=Authorization: file:/run/secrets/relay_mcp_token
 #    （模式 A/B 不用，MCP_EXTRA_HEADERS 留空即可；但 secrets/relay-mcp-token.txt
 #      这个文件仍会被挂载，建个空文件即可）
+#    ⚠️ 这是**静态令牌**路径，只能做到「一个隧道 = 一个租户」。
+#       要每个终端用户各自登录，改用 OAuth（中继侧已支持，见 ../relay/README.md）。
 
 # 2) 起
 docker compose up -d --build
@@ -46,8 +48,14 @@ admin key 喂给 daemon 会鉴权失败。
 
 ### 服务器形态：relay + tunnel 作为一个单元
 
-前面那个 `up -d` 起的是**本机开发形态**（中继跑在宿主上）。要真正部署到服务器，
-加上 `--profile server` —— 这时中继作为主服务、隧道作为它的边车一起起来：
+> ⚠️ **生产不用这个形态了。** 现在的生产部署是「中继直接挂公网、不走隧道」——
+> 见 [`../deploy/server/README.md`](../deploy/server/README.md)。
+> 本节仍然有效，用在**需要让中继藏在隧道后面**的场景（不想开入站端口、
+> 不想自己办 TLS 证书）。
+
+前面那个 `up -d` 起的是**本机开发形态**（中继跑在宿主上）。要把中继与隧道
+作为同一个单元部署，加上 `--profile server` —— 这时中继作为主服务、隧道作为
+它的边车一起起来：
 
 ```bash
 # 1) 建三个 server 专用 secret（内容单行，结尾换行会被 trim）
@@ -224,8 +232,14 @@ compose 里用的是 `${MCP_COMMAND-...}`（`-` 而不是 `:-`），这样空字
 模式 B 的链路是在**容器内用 `dev proxy`**（内存版控制面 + 完整 runtime）验证的，
 所以不依赖 OpenAI 凭据就能证明"隧道 → Windows 执行体"这一段是通的。
 
-**未验证：** 模式 B 下**经 ChatGPT 触发**的一次真实调用。链路各段都单独验过，
-但"ChatGPT 点一下 → 打到 Windows"这个组合还没走过。
+**未验证：** 模式 B（Windows server 那套 7 个工具）下**经 ChatGPT 触发**的一次真实调用。
+链路各段都单独验过，但"ChatGPT 点一下 → 打到 Windows server"这个组合还没走过。
+
+> **别和 relay 那条路径混了。** 已经跑通的是 **relay + device** 形态
+> （DesktopCommander 原生 26 工具，经公网 OAuth，见
+> [`../deploy/server/README.md`](../deploy/server/README.md) 与
+> [`../relay/README.md`](../relay/README.md)）。本文件这套隧道 + Windows server
+> 是**另一条路径**，它的 ChatGPT 侧实测仍然欠着。
 
 ## 容器内自验证（不需要任何凭据）
 
