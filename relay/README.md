@@ -42,6 +42,29 @@ transport），它没法直接当云端 HTTP MCP 端点。中继补的就是这�
 GoTrue 的 session/refresh、PostgREST 的 `.from()`、Realtime 私有频道 + presence、
 JWT。自己重写 Realtime 的 Phoenix 协议不划算。中继自己实现的只有 4 个端点。
 
+## 术语：三个"anon / service_role"不是一回事
+
+这块是**最容易把人绕晕的地方**，而且 2026-09-18 之前本仓库的命名是错的，所以单独说清。
+
+| 东西 | 叫什么 | 能不能改 |
+|---|---|---|
+| **Supabase 的密钥格式** | 旧：`anon` / `service_role`，值形如 `eyJ…`（**Legacy，2026 年底弃用**）<br>新：`Publishable key` / `Secret keys`，值形如 `sb_publishable_…` / `sb_secret_…` | 你选哪个用。**新部署用新的** |
+| **本中继的配置项** | `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_SECRET_KEY` | 已统一成上面**新格式的名字** |
+| **上游自托管 Supabase 的 .env 键名** | `ANON_KEY` / `SERVICE_ROLE_KEY` | **不能改** —— 自托管走 HS256 + `JWT_SECRET`，那两个值是 `{"role":"anon"}` / `{"role":"service_role"}` 签出来的 JWT，角色名写在令牌里 |
+
+所以：
+
+- **你只需要认识 `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_SECRET_KEY`。** 名字与
+  Supabase 控制台的按钮字面一致，填的值就是那两把 `sb_…` 密钥。
+- 早先本仓库把配置项叫 `ANON_KEY` / `SERVICE_ROLE_KEY`（`ANON_KEY_FILE`、
+  `secrets/supabase-anon-key.txt` 同理）。**这套名字已废弃、不再被读取** ——
+  照抄了 Postgres 的角色名当变量名，结果是"文件名说 anon、内容却是 `sb_` 开头"，
+  会让人误以为要去控制台取 Legacy 那把。改名后中继会检测到旧名并直接在报错里
+  给出新名（`config.js` 的 `RENAMED_KEYS`）。
+- **读上游 `supabase/selfhosted/.env` 兜底那一级仍按上游的名字取**（`config.js` 的
+  `UPSTREAM_ENV_ALIAS`），且**只在这一级生效** —— 它不会让 `ANON_KEY` 重新变成一个
+  你可以填的配置项。
+
 ## 部署形态
 
 两种形态，差别只有 `MCP_SERVER_URL` 一个变量 —— 中继服务在 compose 里被 profile
@@ -62,7 +85,7 @@ JWT。自己重写 Realtime 的 Phoenix 协议不划算。中继自己实现的�
   （缺了它会拒绝启动）。
 - **密钥走文件，不走环境变量。** 中继支持 Docker 惯例的 `<KEY>_FILE`，值不经过
   环境变量，因此不出现在 `docker inspect` 的明文里。compose 里用的是
-  `ANON_KEY_FILE=/run/secrets/supabase_anon_key` 这个形式。
+  `SUPABASE_SECRET_KEY_FILE=/run/secrets/supabase_secret_key` 这个形式。
   > ⚠️ 这个约定**是白名单制的**（见 `config.js` 的 `FILE_BACKED_KEYS`），不是对每个
   > 键都拼 `_FILE`。泛化实现会和 `RELAY_SESSION_SECRET_FILE` 撞车 —— 后者是会话密钥的
   > **读写路径**（不存在时要现场生成），泛化实现会误当成"从这个文件读密钥"，
@@ -79,7 +102,7 @@ JWT。自己重写 Realtime 的 Phoenix 协议不划算。中继自己实现的�
 ```bash
 # 1) 起自托管 Supabase（约 11 个容器，首次要拉 2-3GB 镜像）
 cd ../supabase/selfhosted
-node tools/gen-env.js            # 生成 .env（含 JWT_SECRET / ANON_KEY / SERVICE_ROLE_KEY）
+node tools/gen-env.js            # 生成 .env（含 JWT_SECRET 与上游的 ANON_KEY / SERVICE_ROLE_KEY）
 docker compose up -d
 
 # 2) 建表（两段：基础 schema + 多租户迁移）
@@ -239,7 +262,8 @@ rmcp_  a1b2c3d4e5  _  <43 字符 base64url>
 
 ### 隔离靠什么（重点）
 
-中继用 **`service_role` 读写 Supabase，绕过 RLS**。`schema.sql` 里那些
+中继用**高权限的 secret key**（旧称 `service_role`，`SUPABASE_SECRET_KEY`）
+读写 Supabase，绕过 RLS。`schema.sql` 里那些
 `mcp_devices` / `mcp_remote_calls` 的 RLS 策略保护的是 **device 进程直连 PostgREST**
 那条路，对中继自己**完全无效**。
 
@@ -554,7 +578,7 @@ device 侧没有任何轮询兜底（`remote-channel.ts` 只认广播），广�
 - **中继和 device 现在同机，这是权限放大。** 这台 Windows 上同时躺着控制面和执行面，
   于是任何拿到 `run_powershell` 的主体都顺手能读到：`relay/.env` 的
   `RELAY_ADMIN_TOKEN`（可看全部租户）、`relay/.session-secret`（可伪造任意会话）、
-  `supabase/selfhosted/.env` 的 `SERVICE_ROLE_KEY`（绕过 RLS = 整个库）、
+  `supabase/selfhosted/.env` 的 `SERVICE_ROLE_KEY`（上游键名；绕过 RLS = 整个库）、
   `docker/.env` 的 OpenAI runtime key 与 tunnel id。也就是
   **执行面失陷 ⇒ 控制面失陷 ⇒ 全库失陷**，此时上面的租户隔离形同装饰。
   收紧 `/mcp` 鉴权（已完成）只堵住了**走 HTTP** 那条路；本机进程不需要走 HTTP ——
@@ -652,7 +676,7 @@ PASS  门铃可送达                ← 订阅者收到的 payload 与 device �
 
 ```
 PASS  /healthz · 设备列表 · /api/mcp-info 三项
-PASS  device 能用该地址+anon key 打通 PostgREST
+PASS  device 能用该地址+publishable key 打通 PostgREST
 PASS  /device/start → user_code · verification_uri
 PASS  未批准时返回 authorization_pending
 PASS  /device/approve

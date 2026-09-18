@@ -69,7 +69,7 @@
 
 ```bash
 cd supabase/selfhosted
-node tools/gen-env.js --force        # 生成 .env（JWT secret + anon/service key）
+node tools/gen-env.js --force        # 生成 .env（JWT secret + 上游的 anon/service_role key）
 docker compose up -d                 # 约 10 个容器，首次拉 2-3GB 镜像
 bash tools/apply-schema.sh           # 应用 supabase/schema.sql + 自检
 ```
@@ -134,7 +134,7 @@ docker compose up -d
 
 | 脚本 | 验什么 |
 |---|---|
-| `relay/tools/probe-realtime.js` | 风险最高的一环：service_role 广播能否送达私有频道订阅者（无此则整个方案不成立） |
+| `relay/tools/probe-realtime.js` | 风险最高的一环：高权限密钥（`service_role` 角色）广播能否送达私有频道订阅者（无此则整个方案不成立） |
 | `relay/tools/smoke.js` | 把 device 会走的每一步原样走一遍 + RLS 正反断言 + MCP 协议 |
 | `relay/tools/probe-capabilities.js` | 上游 DesktopCommander 的能力声明与工具表形状（`tools/list` 净化逻辑的依据） |
 | `windows/mcp-call.js` | 调试用的 HTTP MCP 客户端，手工调单个工具 |
@@ -158,7 +158,7 @@ docker compose up -d
 3. **`run_powershell` 级别的工具等于当前用户的任意命令权限。** 这是权限放大，
    不是沙箱 —— 沙箱边界只有「哪个 OS 账号在跑 device 进程」。
 4. **密钥全在本机 `.env` 里**，已全部排除在版本控制外。Supabase 侧的
-   `JWT_SECRET` / `ANON_KEY` / `SERVICE_ROLE_KEY` / `POSTGRES_PASSWORD` /
+   `JWT_SECRET` / `ANON_KEY` / `SERVICE_ROLE_KEY`（上游键名）/ `POSTGRES_PASSWORD` /
    `DASHBOARD_PASSWORD` 等由 `supabase/selfhosted/tools/gen-env.js` 现场生成，
    每个部署一套；`docker/.env` 里的 `CONTROL_PLANE_API_KEY` 与
    `windows/server.env` 里的 `MCP_PATH_TOKEN` 同理。

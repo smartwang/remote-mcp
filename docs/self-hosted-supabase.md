@@ -51,6 +51,15 @@ GET {MCP_SERVER_URL}/api/mcp-info
 device 的代码路径全程按 JWT 处理（`realtime.setAuth(jwt)`、RLS 靠 `auth.uid()`），
 legacy anon key 是这条路径上被验证最多、兼容性最稳的选择。
 
+> 这里的 legacy 是**自托管 Supabase 的实现事实**，不是命名遗留：自托管走
+> HS256 + `JWT_SECRET`，那个值就是 `{"role":"anon"}` 的 JWT，角色名写在令牌里，
+> 上游的 compose / envoy 模板也按 `ANON_KEY` 引用它 —— 所以**不能改名**。
+>
+> 而**中继那边不叫这个名字**：它读的是 `SUPABASE_PUBLISHABLE_KEY`
+> （读这份上游 `.env` 时按 `UPSTREAM_ENV_ALIAS` 自动映射，见 `relay/src/config.js`）。
+> 托管 Supabase 上对应的则是 `sb_publishable_…`。三处名字不同是刻意的，
+> 别为了"统一"去改上游的 `.env`。
+
 两个坑：
 
 - **`ANON_KEY` 的 `exp` 必须足够远或干脆不带。** `.env.example` 里那个示例 anon key 的 `exp`

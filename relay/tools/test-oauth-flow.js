@@ -190,7 +190,7 @@ async function deleteUserByEmail(email) {
   if (!u) return false;
   await supa.request(`${cfg.SUPABASE_URL}/auth/v1/admin/users/${u.id}`, {
     method: 'DELETE',
-    headers: supa.serviceHeaders(),
+    headers: supa.secretKeyHeaders(),
     timeoutMs: 20000,
   }).catch(() => {});
   return true;

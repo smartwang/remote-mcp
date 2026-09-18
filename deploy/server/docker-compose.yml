@@ -46,7 +46,8 @@ services:
       RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL:-}
 
       # —— Supabase（托管实例）——
-      # 同样交给 relay 自己判：ANON_KEY / SERVICE_ROLE_KEY 缺失时它列清单拒启。
+      # 同样交给 relay 自己判：SUPABASE_PUBLISHABLE_KEY / SUPABASE_SECRET_KEY
+      # 缺失时它列清单拒启。
       SUPABASE_URL: ${SUPABASE_URL:-}
       PUBLIC_SUPABASE_URL: ${PUBLIC_SUPABASE_URL:-}
 
@@ -63,14 +64,14 @@ services:
 
       # —— 密钥走文件，不走环境变量 ——
       # 环境变量会出现在 docker inspect 的明文里，任何能跑 docker 命令的人都能看到。
-      ANON_KEY_FILE: /run/secrets/supabase_anon_key
-      SERVICE_ROLE_KEY_FILE: /run/secrets/supabase_service_role_key
+      SUPABASE_PUBLISHABLE_KEY_FILE: /run/secrets/supabase_publishable_key
+      SUPABASE_SECRET_KEY_FILE: /run/secrets/supabase_secret_key
       RELAY_ADMIN_TOKEN_FILE: /run/secrets/relay_admin_token
       RELAY_SESSION_SECRET_FILE: /app/state/session-secret
 
     secrets:
-      - supabase_anon_key
-      - supabase_service_role_key
+      - supabase_publishable_key
+      - supabase_secret_key
       - relay_admin_token
 
     # 只绑回环。反代（SafeLine）与它同机，走 127.0.0.1 即可 ——
@@ -115,9 +116,12 @@ volumes:
 secrets:
   # 每个文件都是**单行**，结尾换行会被自动 trim 掉。
   # 不要在这里写 `Bearer ` 前缀 —— 那是隧道静态头的格式，中继这里只要裸值。
-  supabase_anon_key:
-    file: ./secrets/supabase-anon-key.txt
-  supabase_service_role_key:
-    file: ./secrets/supabase-service-role-key.txt
+  # 命名对齐 Supabase 控制台（Publishable key / Secret keys）。早先叫
+  # supabase_anon_key / supabase_service_role_key —— 那是 Postgres 角色名，
+  # 而 Supabase 已把这套密钥标为 Legacy、2026 年底弃用。2026-09-18 改名。
+  supabase_publishable_key:
+    file: ./secrets/supabase-publishable-key.txt
+  supabase_secret_key:
+    file: ./secrets/supabase-secret-key.txt
   relay_admin_token:
     file: ./secrets/relay-admin-token.txt

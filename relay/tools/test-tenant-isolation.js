@@ -321,6 +321,30 @@ async function purgeTestTokens(userId) {
   }
 }
 
+/**
+ * 删掉一个测试租户（账号 + 令牌）。
+ *
+ * **只能对脚本自己建的账号用。** 租户 A 用的是 `cfg.OWNER_EMAIL` ——
+ * 那是部署本人的管理员账号，删掉等于把控制台锁死，所以这里显式挡一道。
+ *
+ * 为什么必须连账号一起删：测试账号的密码是**硬编码在本文件里**的
+ * （`relay-test-password-9182`）。只清令牌的话，这个账号仍然能登录
+ * `/console`，而登录之后**可以自己再签发一枚 `/mcp` 令牌** —— 等于库里
+ * 一直留着一把钥匙。清令牌是"收走钥匙"，删账号才是"拆掉门"。
+ */
+async function removeTestTenant(userId, email, { purgeTokens = true } = {}) {
+  if (!userId) return;
+  const owner = (cfg.OWNER_EMAIL || '').toLowerCase();
+  if (email && owner && email.toLowerCase() === owner) {
+    console.log(`  ⚠ 跳过删除 ${email} —— 它是 owner 账号，不是测试产物`);
+    return;
+  }
+  if (purgeTokens) await purgeTestTokens(userId);
+  await supa.auth.deleteUser(userId).catch((err) => {
+    console.log(`  ⚠ 删除测试账号 ${email} 失败（需手工清理）：${err.message}`);
+  });
+}
+
 /* ------------------------------------------------------------------ 主流程 */
 
 async function main() {
@@ -605,8 +629,12 @@ async function main() {
   // 依然是一枚**有效凭据**，能在库里躺到下次有人跑测试为止 —— 等于存着一把
   // 无人认领、却能直接 POST /mcp 的钥匙。开头的 purge 只保证"下次跑之前干净"，
   // 不保证"这次跑完之后干净"，两件事不一样。
+  // A 只清令牌：`A_EMAIL` 就是 `cfg.OWNER_EMAIL`（部署本人的管理员账号），
+  // 删账号会把控制台锁死。这里**不要**为了对称去删它。
   await purgeTestTokens(tenantA.id);
-  await purgeTestTokens(tenantB.id);
+  // B 是脚本自己建的（tenant-b@relay.test），账号连令牌一起删 ——
+  // 它的密码硬编码在本文件里，留着等于留一把能登录控制台、再自签令牌的钥匙。
+  await removeTestTenant(tenantB.id, tenantB.email);
 
   return finish();
 }

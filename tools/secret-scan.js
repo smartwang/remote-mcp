@@ -41,6 +41,9 @@ const SOURCES = [
   'windows/server.env',
 ];
 
+// 名字里带这些片段的变量，其值会被当成候选凭据去搜暂存区。
+// 两种命名都要覆盖：中继自己用 PUBLISHABLE_KEY / SECRET_KEY，
+// 上游自托管 .env 用的是 ANON_KEY / SERVICE_ROLE_KEY。
 const SENSITIVE = /(_KEY|_SECRET|_TOKEN|_PASSWORD|SERVICE_ROLE|JWT_SECRET|ANON_KEY|CONTROL_PLANE|ADMIN_TOKEN)/;
 
 /**

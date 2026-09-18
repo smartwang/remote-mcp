@@ -10,7 +10,10 @@
  *
  * 与官方一致的还有：不启用非对称密钥（JWT_KEYS/JWT_JWKS 留空），
  * 于是 Auth / PostgREST / Realtime 全部回落到 HS256 的 JWT_SECRET。
- * device 侧的 supabase-js 拿 ANON_KEY 当 publishable key，兼容。
+ * 生成的两个 JWT 是 `role=anon` / `role=service_role` —— 角色名在令牌里，
+ * 所以上游这份 .env 只能叫 ANON_KEY / SERVICE_ROLE_KEY（改名会同时弄坏
+ * envoy 与 compose 的引用）。中继侧读的是 SUPABASE_PUBLISHABLE_KEY /
+ * SUPABASE_SECRET_KEY，靠 UPSTREAM_ENV_ALIAS 映射，两边不冲突。
  *
  * 用法：
  *   node tools/gen-env.js            # 生成 .env（已存在则拒绝覆盖，除非 --force）
@@ -87,6 +90,12 @@ function main() {
   };
 
   // 显式清空：走 legacy HS256 单密钥路径，不启用非对称密钥。
+  //
+  // 这里的 SUPABASE_PUBLISHABLE_KEY / SUPABASE_SECRET_KEY 是**上游 Supabase 的**
+  // 新格式键位（配合 JWT_KEYS/JWT_JWKS 走 ES256 + opaque key），要留空。
+  // 中继读它想要的同名变量时，是从 ANON_KEY / SERVICE_ROLE_KEY 映射过来的
+  // （见 relay/src/config.js 的 UPSTREAM_ENV_ALIAS），**不依赖这两个键位** ——
+  // 所以这里清空不会让中继读不到密钥。
   const blanks = ['SUPABASE_PUBLISHABLE_KEY', 'SUPABASE_SECRET_KEY', 'JWT_KEYS', 'JWT_JWKS'];
 
   let text = fs.readFileSync(EXAMPLE, 'utf8');
@@ -120,8 +129,12 @@ function main() {
   console.log('');
   console.log('   ---- 中继服务要用的两个值（从 .env 读，别硬编码）----');
   console.log(`   SUPABASE_URL       = http://127.0.0.1:${PORTS.API_GW_HTTP_PORT}`);
+  // 两边名字不同但**是同一个值**：上游服务按角色名读（JWT 里就写着 role），
+  // 中继按 Supabase 控制台的按钮名读（它读这份 .env 时靠 UPSTREAM_ENV_ALIAS 映射）。
   console.log(`   ANON_KEY           = ${anonKey.slice(0, 32)}…  (长度 ${anonKey.length})`);
+  console.log(`     ↑ 中继里的名字是 SUPABASE_PUBLISHABLE_KEY，同一个值`);
   console.log(`   SERVICE_ROLE_KEY   = ${serviceRoleKey.slice(0, 32)}…  (长度 ${serviceRoleKey.length})`);
+  console.log(`     ↑ 中继里的名字是 SUPABASE_SECRET_KEY，同一个值`);
   console.log('');
   console.log('   ---- 验签自检 ----');
   const [h, p, s] = anonKey.split('.');

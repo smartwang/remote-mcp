@@ -53,8 +53,8 @@ admin key 喂给 daemon 会鉴权失败。
 # 1) 建三个 server 专用 secret（内容单行，结尾换行会被 trim）
 cd docker
 printf '%s\n' "$(openssl rand -hex 32)"     > secrets/relay-admin-token.txt
-printf '%s\n' '<Supabase 的 ANON_KEY>'      > secrets/supabase-anon-key.txt
-printf '%s\n' '<Supabase 的 SERVICE_ROLE_KEY>' > secrets/supabase-service-role-key.txt
+printf '%s\n' 'sb_publishable_...'          > secrets/supabase-publishable-key.txt
+printf '%s\n' 'sb_secret_...'               > secrets/supabase-secret-key.txt
 chmod 600 secrets/*
 
 # 2) .env 里切到服务器形态（三个变量，见 .env.example 末尾一节）
@@ -78,7 +78,8 @@ profile 挡住，所以开发形态下不会多起一个中继去抢宿主上的
 
 - **compose 里的 relay 段用 `${VAR-default}` 而不用 `${VAR:?}`。** compose 的 `:?`
   插值对**所有**服务生效、**不认 profile** —— 用它会让本机开发形态也一起起不来。
-  "必须有值"交给中继自己判（缺 ANON_KEY / SERVICE_ROLE_KEY 时拒绝启动并列出缺哪项）。
+  "必须有值"交给中继自己判（缺 `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_SECRET_KEY`
+  时拒绝启动并列出缺哪项）。
 - **relay 的 18086 默认不发布到宿主。** 前面有 TLS 反代时应该让它走 compose 网络，
   端口不出现在宿主上。要自己直连就把 `ports` 那段取消注释 —— **只绑 127.0.0.1**，
   绑 0.0.0.0 会让 `/console` 与 `/api/mcp-info` 对局域网敞开。

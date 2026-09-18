@@ -52,8 +52,8 @@ function withTimeout(promise, ms, label) {
 async function main() {
   console.log('=== remote-mcp 中继 · 上游体检 ===\n');
   console.log(`Supabase        ${cfg.SUPABASE_URL}`);
-  console.log(`ANON_KEY        ${cfg.ANON_KEY?.slice(0, 24)}… (${cfg.ANON_KEY?.length} 字符)`);
-  console.log(`SERVICE_ROLE    ${cfg.SERVICE_ROLE_KEY?.slice(0, 24)}… (${cfg.SERVICE_ROLE_KEY?.length} 字符)\n`);
+  console.log(`publishable key ${cfg.SUPABASE_PUBLISHABLE_KEY?.slice(0, 24)}… (${cfg.SUPABASE_PUBLISHABLE_KEY?.length} 字符)`);
+  console.log(`secret key      ${cfg.SUPABASE_SECRET_KEY?.slice(0, 24)}… (${cfg.SUPABASE_SECRET_KEY?.length} 字符)\n`);
 
   const results = {};
 
@@ -114,7 +114,7 @@ async function main() {
   // ---- 3. Realtime：REST 广播 → 私有频道 WS 订阅者 ----
   console.log('\n3. Realtime 门铃链路（REST broadcast → 私有频道订阅者）');
 
-  const wsUrl = cfg.SUPABASE_URL.replace(/^http/, 'ws') + `/realtime/v1/websocket?apikey=${cfg.ANON_KEY}&vsn=1.0.0`;
+  const wsUrl = cfg.SUPABASE_URL.replace(/^http/, 'ws') + `/realtime/v1/websocket?apikey=${cfg.SUPABASE_PUBLISHABLE_KEY}&vsn=1.0.0`;
   const topic = `user:${user.id}`;
   const received = [];
   let joined = false;
@@ -140,7 +140,7 @@ async function main() {
     results.broadcast = false;
   } else {
     results.ws = true;
-    line(true, 'WebSocket 已连上', wsUrl.replace(cfg.ANON_KEY, '<anon>'));
+    line(true, 'WebSocket 已连上', wsUrl.replace(cfg.SUPABASE_PUBLISHABLE_KEY, '<publishable>'));
 
     const joinRef = '1';
     let joinSettled = null;

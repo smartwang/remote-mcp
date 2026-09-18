@@ -105,14 +105,14 @@ function keyHeaders(key, extra = {}) {
   return headers;
 }
 
-/** service_role / sb_secret_… —— 绕过 RLS，只能出现在受控后端。 */
-function serviceHeaders(extra = {}) {
-  return keyHeaders(cfg.SERVICE_ROLE_KEY, extra);
+/** Secret key（sb_secret_…，旧称 service_role）—— 绕过 RLS，只能出现在受控后端。 */
+function secretKeyHeaders(extra = {}) {
+  return keyHeaders(cfg.SUPABASE_SECRET_KEY, extra);
 }
 
-/** anon / sb_publishable_… —— 低权限，用于模拟普通客户端。 */
-function anonHeaders(extra = {}) {
-  return keyHeaders(cfg.ANON_KEY, extra);
+/** Publishable key（sb_publishable_…，旧称 anon）—— 低权限，用于模拟普通客户端。 */
+function publishableKeyHeaders(extra = {}) {
+  return keyHeaders(cfg.SUPABASE_PUBLISHABLE_KEY, extra);
 }
 
 /* ------------------------------------------------------------------ PostgREST */
@@ -125,12 +125,12 @@ function qs(params) {
 
 const rest = {
   async select(table, params = {}, { single = false } = {}) {
-    const headers = serviceHeaders(single ? { Accept: 'application/vnd.pgrst.object+json' } : {});
+    const headers = secretKeyHeaders(single ? { Accept: 'application/vnd.pgrst.object+json' } : {});
     const { data } = await request(`${cfg.SUPABASE_URL}/rest/v1/${table}?${qs(params)}`, { headers });
     return data;
   },
   async insert(table, rows, { returning = true } = {}) {
-    const headers = serviceHeaders(returning ? { Prefer: 'return=representation' } : {});
+    const headers = secretKeyHeaders(returning ? { Prefer: 'return=representation' } : {});
     const { data } = await request(`${cfg.SUPABASE_URL}/rest/v1/${table}`, {
       method: 'POST',
       headers,
@@ -139,7 +139,7 @@ const rest = {
     return data;
   },
   async update(table, params, patch) {
-    const headers = serviceHeaders({ Prefer: 'return=representation' });
+    const headers = secretKeyHeaders({ Prefer: 'return=representation' });
     const { data } = await request(`${cfg.SUPABASE_URL}/rest/v1/${table}?${qs(params)}`, {
       method: 'PATCH',
       headers,
@@ -148,7 +148,7 @@ const rest = {
     return data;
   },
   async del(table, params) {
-    const headers = serviceHeaders({ Prefer: 'return=representation' });
+    const headers = secretKeyHeaders({ Prefer: 'return=representation' });
     const { data } = await request(`${cfg.SUPABASE_URL}/rest/v1/${table}?${qs(params)}`, {
       method: 'DELETE',
       headers,
@@ -163,7 +163,7 @@ const auth = {
   /** 找用户或建用户。返回 GoTrue 的 user 对象。 */
   async ensureUser(email, password, { timeoutMs = 20000 } = {}) {
     const listUrl = `${cfg.SUPABASE_URL}/auth/v1/admin/users?page=1&per_page=200`;
-    const { data: listing } = await request(listUrl, { headers: serviceHeaders(), timeoutMs });
+    const { data: listing } = await request(listUrl, { headers: secretKeyHeaders(), timeoutMs });
     const users = listing?.users || (Array.isArray(listing) ? listing : []);
     const existing = users.find((u) => (u.email || '').toLowerCase() === email.toLowerCase());
     if (existing) return existing;
@@ -171,7 +171,7 @@ const auth = {
     try {
       const { data } = await request(`${cfg.SUPABASE_URL}/auth/v1/admin/users`, {
         method: 'POST',
-        headers: serviceHeaders(),
+        headers: secretKeyHeaders(),
         body: { email, password, email_confirm: true },
         timeoutMs,
       });
@@ -179,7 +179,7 @@ const auth = {
     } catch (err) {
       // 并发下可能被判重，再查一次
       if (err.status === 422 || err.status === 409) {
-        const { data: retry } = await request(listUrl, { headers: serviceHeaders(), timeoutMs });
+        const { data: retry } = await request(listUrl, { headers: secretKeyHeaders(), timeoutMs });
         const again = (retry?.users || []).find((u) => (u.email || '').toLowerCase() === email.toLowerCase());
         if (again) return again;
       }
@@ -191,7 +191,7 @@ const auth = {
   async setPassword(userId, password) {
     const { data } = await request(`${cfg.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
       method: 'PUT',
-      headers: serviceHeaders(),
+      headers: secretKeyHeaders(),
       body: { password, email_confirm: true },
     });
     return data;
@@ -202,7 +202,7 @@ const auth = {
     // 注意：这个调用要用 anon key（模拟普通客户端），而不是 service_role。
     const { data } = await request(`${cfg.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
       method: 'POST',
-      headers: anonHeaders(),
+      headers: publishableKeyHeaders(),
       body: { email, password },
     });
     if (!data?.access_token) {
@@ -215,7 +215,7 @@ const auth = {
   async refresh(refreshToken) {
     const { data } = await request(`${cfg.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
       method: 'POST',
-      headers: anonHeaders(),
+      headers: publishableKeyHeaders(),
       body: { refresh_token: refreshToken },
     });
     return data;
@@ -226,7 +226,7 @@ const auth = {
     if (!id) return null;
     try {
       const { data } = await request(`${cfg.SUPABASE_URL}/auth/v1/admin/users/${id}`, {
-        headers: serviceHeaders(),
+        headers: secretKeyHeaders(),
         timeoutMs: 15000,
       });
       return data?.id ? data : data?.user || null;
@@ -236,11 +236,25 @@ const auth = {
     }
   },
 
+  /**
+   * 删用户（GoTrue admin 接口）。**只给测试 / 清理脚本用。**
+   *
+   * 测试账号的密码是硬编码在脚本里的，跑完不删就等于在库里留一个谁都能登录
+   * 的账号 —— 而登录进 `/console` 就能自己签发 `/mcp` 令牌，等于留了一把钥匙。
+   */
+  async deleteUser(userId) {
+    if (!userId) return;
+    await request(`${cfg.SUPABASE_URL}/auth/v1/admin/users/${userId}`, {
+      method: 'DELETE',
+      headers: secretKeyHeaders(),
+    });
+  },
+
   /** 按 email 查用户（不存在返回 null，不建）。 */
   async findByEmail(email) {
     if (!email) return null;
     const { data: listing } = await request(`${cfg.SUPABASE_URL}/auth/v1/admin/users?page=1&per_page=200`, {
-      headers: serviceHeaders(),
+      headers: secretKeyHeaders(),
       timeoutMs: 20000,
     });
     const users = listing?.users || (Array.isArray(listing) ? listing : []);
@@ -253,7 +267,7 @@ const auth = {
     try {
       const { data } = await request(`${cfg.SUPABASE_URL}/auth/v1/admin/users`, {
         method: 'POST',
-        headers: serviceHeaders(),
+        headers: secretKeyHeaders(),
         body: { email, password, email_confirm: true },
         timeoutMs: 20000,
       });
@@ -284,7 +298,7 @@ const auth = {
   async mintSession(email) {
     const { data: link } = await request(`${cfg.SUPABASE_URL}/auth/v1/admin/generate_link`, {
       method: 'POST',
-      headers: serviceHeaders(),
+      headers: secretKeyHeaders(),
       body: { type: 'magiclink', email },
       timeoutMs: 20000,
     });
@@ -294,7 +308,7 @@ const auth = {
     }
     const { data: session } = await request(`${cfg.SUPABASE_URL}/auth/v1/verify`, {
       method: 'POST',
-      headers: anonHeaders(),
+      headers: publishableKeyHeaders(),
       body: { type: 'magiclink', token: otp, email },
       timeoutMs: 20000,
     });
@@ -324,7 +338,7 @@ async function broadcast(topic, event, payload, { privateTopic = true } = {}) {
   try {
     const { data } = await request(`${cfg.SUPABASE_URL}/realtime/v1/api/broadcast`, {
       method: 'POST',
-      headers: serviceHeaders(),
+      headers: secretKeyHeaders(),
       body,
       timeoutMs: 10000,
     });
@@ -463,7 +477,7 @@ module.exports = {
   audit,
   auditTail,
   request,
-  serviceHeaders,
-  anonHeaders,
+  secretKeyHeaders,
+  publishableKeyHeaders,
   randomId: () => crypto.randomUUID(),
 };

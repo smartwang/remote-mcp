@@ -30,8 +30,8 @@ relay 不执行任何命令，只做鉴权与派发。真正跑命令的是 Wind
 |---|---|---|
 | `SUPABASE_URL` | 顶部 **Connect** 对话框，或 Settings → Data API → Project URL | `.env` |
 | `PUBLIC_SUPABASE_URL` | 同上（托管实例这两个同值） | `.env` |
-| publishable key | Settings → **API Keys** → **`API keys`** 页签 → `Publishable key` | `secrets/supabase-anon-key.txt` |
-| secret key | 同一个页签 → `Secret keys` | `secrets/supabase-service-role-key.txt` |
+| publishable key | Settings → **API Keys** → **`API keys`** 页签 → `Publishable key` | `secrets/supabase-publishable-key.txt` |
+| secret key | 同一个页签 → `Secret keys` | `secrets/supabase-secret-key.txt` |
 | 数据库连接串 | Settings → **Database** → Connection string → **Session pooler**（IPv4 可达） | 只在建表时用一次，不落盘 |
 
 ### 密钥：用**新格式**（`sb_publishable_…` / `sb_secret_…`），不要用 Legacy
@@ -56,8 +56,9 @@ relay 不执行任何命令，只做鉴权与派发。真正跑命令的是 Wind
    `?apikey=…`，本来就是新格式该走的位置。
 
 > **万一** device 侧在新格式下连不上（这是唯一没在真 Supabase 上跑过的路径），
-> 回退成本是零：把这两个文件换回 Legacy key 再 `docker compose up -d`，
-> **不用改代码、不用重建镜像**。
+> 回退成本是零：把这两个文件的内容换成 Legacy key 再 `docker compose up -d`，
+> **不用改代码、不用重建镜像**（文件名不用动 —— 那两个文件装的是"低权限那把 /
+> 高权限那把"，跟密钥是新格式还是 Legacy 无关）。
 >
 > 反过来说 —— 为了一个"可零成本回退"的风险，从一条**官方已弃用**的凭据路径起步，
 > 是不划算的。先上新格式。
@@ -108,12 +109,11 @@ mkdir -p secrets
 # 管理员面令牌。持有者能看到所有租户的设备与审计。
 printf '%s\n' "rmcpadmin_$(openssl rand -hex 24)" > secrets/relay-admin-token.txt
 
-# 从 Supabase 项目拷贝（值是新格式 sb_publishable_… / sb_secret_…）
-# 文件名里的 anon / service_role 是历史命名（代码里的变量名也叫 ANON_KEY /
-# SERVICE_ROLE_KEY），**指代的是"低权限那把"和"高权限那把"**，不是要你去
-# Legacy 页签取 key。
-printf '%s\n' 'sb_publishable_...' > secrets/supabase-anon-key.txt
-printf '%s\n' 'sb_secret_...'      > secrets/supabase-service-role-key.txt
+# 从 Supabase 项目拷贝。文件名、变量名、控制台上的按钮名**三者字面一致**：
+#   Publishable key → secrets/supabase-publishable-key.txt
+#   Secret keys     → secrets/supabase-secret-key.txt
+printf '%s\n' 'sb_publishable_...' > secrets/supabase-publishable-key.txt
+printf '%s\n' 'sb_secret_...'      > secrets/supabase-secret-key.txt
 
 chmod 600 secrets/*.txt
 ```
@@ -138,9 +138,9 @@ chmod 600 secrets/*.txt
 > 权限语义），所以本机联调一切正常、一上 Linux 就全挂。用 `deploy/server/setup.sh`
 > 可以避免手抄。
 
-> ⚠️ `service_role` key 绕开 RLS。它进容器的唯一路径是 secret 文件，
-> 不以环境变量形式存在 —— 环境变量会出现在 `docker inspect` 的明文里。
-> 中继用 service_role 直连是**有意为之**（`supa.tenantScope()` 在代码层做隔离，
+> ⚠️ **secret key**（旧称 `service_role`）绕开 RLS。它进容器的唯一路径是
+> secret 文件，不以环境变量形式存在 —— 环境变量会出现在 `docker inspect` 的明文里。
+> 中继用高权限密钥直连是**有意为之**（`supa.tenantScope()` 在代码层做隔离，
 > 因为 RLS 对高权限连接根本不生效）。
 
 ```bash
@@ -247,7 +247,8 @@ DCR 注册并长期复用那个 `client_id`。删了之后用户下一次刷新�
 
 | 现象 | 大概率原因 |
 |---|---|
-| 容器起不来，日志报 `ANON_KEY 缺失` | secrets 文件没建，或写成 `<KEY>_FILE` 之外的形式 |
+| 容器起不来，日志报 `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_SECRET_KEY` 缺失 | secrets 文件没建，或写成 `<KEY>_FILE` 之外的形式 |
+| 日志报 `ANON_KEY 已改名` | 配置里还在用 2026-09-18 之前的旧变量名 / 旧文件名，照提示换成 `SUPABASE_PUBLISHABLE_KEY` / `SUPABASE_SECRET_KEY`（`setup.sh` 会自动搬旧文件名） |
 | 一切 Supabase 调用都 401 `Invalid JWT` | 密钥值本身有问题（截断、带引号、被停用），或它根本不是这个项目的 key。**注入位置不用你操心** —— `supa.js` 已按官方 SDK 规则按前缀自动决定发不发 Bearer |
 | 只有 device 连不上（中继正常） | `PUBLIC_SUPABASE_URL` 或下发的那把 publishable key 不对 —— device 是独立进程，它的报错不会出现在 relay 日志里 |
 | 日志报 `RELAY_PUBLIC_URL 必填` | `.env` 没填或 compose 没读到（注意要在同目录） |

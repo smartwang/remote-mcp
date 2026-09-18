@@ -4,9 +4,13 @@
 #   cd /root/remote-mcp-relay
 #   SUPABASE_URL=https://xxx.supabase.co \
 #   PUBLIC_SUPABASE_URL=https://xxx.supabase.co \
-#   SUPABASE_ANON_KEY=eyJ... \
-#   SUPABASE_SERVICE_ROLE_KEY=eyJ... \
+#   SUPABASE_PUBLISHABLE_KEY=sb_publishable_... \
+#   SUPABASE_SECRET_KEY=sb_secret_... \
 #   ./setup.sh
+#
+# 两个 key 从 Supabase 控制台拿：Settings → API Keys → Publishable key / Secret keys。
+# **不要用 Legacy 那两把**（叫 anon / service_role，值形如 eyJ…）：官方已标弃用
+# （2026 年底），新部署没有理由从弃用路径起步。
 #
 # 已存在的东西不会被覆盖 —— 重复执行是安全的（幂等的），
 # 这样"改一个值再跑一遍"不会把已生成的令牌和口令冲掉。
@@ -61,14 +65,25 @@ set_kv() {
 if [ -n "${SUPABASE_URL:-}" ]; then set_kv SUPABASE_URL "$SUPABASE_URL"; say "· SUPABASE_URL 已写入"; fi
 if [ -n "${PUBLIC_SUPABASE_URL:-}" ]; then set_kv PUBLIC_SUPABASE_URL "$PUBLIC_SUPABASE_URL"; say "· PUBLIC_SUPABASE_URL 已写入"; fi
 
-if [ -n "${SUPABASE_ANON_KEY:-}" ]; then
-  printf '%s\n' "$SUPABASE_ANON_KEY" > secrets/supabase-anon-key.txt
-  say "· secrets/supabase-anon-key.txt 已写入"
+if [ -n "${SUPABASE_PUBLISHABLE_KEY:-}" ]; then
+  printf '%s\n' "$SUPABASE_PUBLISHABLE_KEY" > secrets/supabase-publishable-key.txt
+  say "· secrets/supabase-publishable-key.txt 已写入"
 fi
-if [ -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
-  printf '%s\n' "$SUPABASE_SERVICE_ROLE_KEY" > secrets/supabase-service-role-key.txt
-  say "· secrets/supabase-service-role-key.txt 已写入"
+if [ -n "${SUPABASE_SECRET_KEY:-}" ]; then
+  printf '%s\n' "$SUPABASE_SECRET_KEY" > secrets/supabase-secret-key.txt
+  say "· secrets/supabase-secret-key.txt 已写入"
 fi
+
+# 改名前的旧文件名：留一份搬走而不是留一份报错说明 —— 免得老手照着旧文档
+# 又把文件建回来，那时容器会以"缺 key"启动失败，而目录里明明摆着两个 txt。
+for old in supabase-anon-key:supabase-publishable-key supabase-service-role-key:supabase-secret-key; do
+  from="secrets/${old%%:*}.txt"
+  to="secrets/${old##*:}.txt"
+  if [ -s "$from" ] && [ ! -s "$to" ]; then
+    mv "$from" "$to"
+    warn "· 已把旧文件名 $from 改名为 $to（2026-09-18 更名，旧名不再被读取）"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # ③ 自生成的密钥
@@ -102,8 +117,18 @@ echo
 say "── 体检 ──"
 
 fail=0
-[ -s secrets/supabase-anon-key.txt ]         || { warn "  ✗ 缺 secrets/supabase-anon-key.txt（传 SUPABASE_ANON_KEY=... 重跑）"; fail=1; }
-[ -s secrets/supabase-service-role-key.txt ] || { warn "  ✗ 缺 secrets/supabase-service-role-key.txt（传 SUPABASE_SERVICE_ROLE_KEY=... 重跑）"; fail=1; }
+[ -s secrets/supabase-publishable-key.txt ] || { warn "  ✗ 缺 secrets/supabase-publishable-key.txt（传 SUPABASE_PUBLISHABLE_KEY=sb_publishable_... 重跑）"; fail=1; }
+[ -s secrets/supabase-secret-key.txt ]      || { warn "  ✗ 缺 secrets/supabase-secret-key.txt（传 SUPABASE_SECRET_KEY=sb_secret_... 重跑）"; fail=1; }
+# 兜一句：Legacy 的 anon / service_role 不是"另一种可选填法"，是弃用凭据。
+for f in secrets/supabase-publishable-key.txt secrets/supabase-secret-key.txt; do
+  [ -s "$f" ] || continue
+  case "$(cut -c1-3 "$f")" in
+    eyJ) warn "  ! $f 的内容是 JWT（eyJ…）。"
+         warn "    · 连 Supabase Cloud → 这是 Legacy 的 anon / service_role，请换成"
+         warn "      sb_publishable_… / sb_secret_…（官方已标弃用，2026 年底停用）。"
+         warn "    · 连自托管 Supabase → 正常，那边就是 HS256 + JWT_SECRET 签出来的角色 JWT。" ;;
+  esac
+done
 grep -qE '^SUPABASE_URL=https' .env          || { warn "  ✗ .env 的 SUPABASE_URL 未填或非 https"; fail=1; }
 grep -qE '^PUBLIC_SUPABASE_URL=https' .env   || { warn "  ✗ .env 的 PUBLIC_SUPABASE_URL 未填或非 https"; fail=1; }
 grep -qE '^RELAY_PUBLIC_URL=https://[^/]+$' .env || warn "  ! RELAY_PUBLIC_URL 不是以 https:// 开头、或不带结尾斜杠的形式 —— 请核对"

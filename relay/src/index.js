@@ -544,7 +544,7 @@ function sendConsole(res, req, opts = {}) {
 async function buildAdminView() {
   const [usersRaw, devicesRaw, tokensRaw, auditRows, grantsRaw, clientsRaw] = await Promise.all([
     supa.request(`${cfg.SUPABASE_URL}/auth/v1/admin/users?page=1&per_page=200`, {
-      headers: supa.serviceHeaders(),
+      headers: supa.secretKeyHeaders(),
       timeoutMs: 20000,
     }).then((r) => r.data).catch(() => null),
     supa.rest.select('mcp_devices', { select: '*', order: 'last_seen.desc', limit: '500' }).catch(() => []),
@@ -756,7 +756,7 @@ function createServer() {
         // 安全性由 Supabase 侧的 RLS 兜底，不靠这里藏密钥。
         return sendJson(res, 200, {
           supabaseUrl: cfg.PUBLIC_SUPABASE_URL,
-          supabasePublishableKey: cfg.ANON_KEY,
+          supabasePublishableKey: cfg.SUPABASE_PUBLISHABLE_KEY,
         });
       }
 
@@ -1106,7 +1106,7 @@ function main() {
     console.error('❌ 配置不完整：');
     for (const p of problems) console.error(`   - ${p}`);
     console.error(
-      '\n提示：ANON_KEY / SERVICE_ROLE_KEY / RELAY_ADMIN_TOKEN 三处任一即可 ——\n' +
+      '\n提示：SUPABASE_PUBLISHABLE_KEY / SUPABASE_SECRET_KEY / RELAY_ADMIN_TOKEN 三处任一即可 ——\n' +
         '   ① 环境变量本身；② `<同名>_FILE=/run/secrets/xxx`（容器部署走这条，不进 docker inspect）；\n' +
         '   ③ 源码目录里的 relay/.env 或 ../supabase/selfhosted/.env（仅本机开发）。'
     );

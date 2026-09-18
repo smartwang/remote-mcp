@@ -31,8 +31,8 @@
 #   2) 建 secrets/：
 #        printf '%s\n' 'sk-你的RuntimeAPIKey'        > secrets/control-plane.key
 #        printf '%s\n' "$(openssl rand -hex 32)"     > secrets/relay-admin-token.txt
-#        printf '%s\n' '<supabase anon key>'         > secrets/supabase-anon-key.txt
-#        printf '%s\n' '<supabase service_role key>' > secrets/supabase-service-role-key.txt
+#        printf '%s\n' 'sb_publishable_...'           > secrets/supabase-publishable-key.txt
+#        printf '%s\n' 'sb_secret_...'                > secrets/supabase-secret-key.txt
 #        chmod 600 secrets/*
 #   3) docker compose --profile server up -d --build
 #   4) curl -fsS http://127.0.0.1:18080/readyz     # 隧道就绪
@@ -105,16 +105,16 @@ services:
 
       # 密钥走文件，不走环境变量 —— 环境变量会出现在 docker inspect 的明文里。
       # 读取由 relay/src/config.js 的 <KEY>_FILE 约定支持。
-      ANON_KEY_FILE: /run/secrets/supabase_anon_key
-      SERVICE_ROLE_KEY_FILE: /run/secrets/supabase_service_role_key
+      SUPABASE_PUBLISHABLE_KEY_FILE: /run/secrets/supabase_publishable_key
+      SUPABASE_SECRET_KEY_FILE: /run/secrets/supabase_secret_key
       RELAY_ADMIN_TOKEN_FILE: /run/secrets/relay_admin_token
       # 会话签名密钥：一旦重新生成，所有已登录用户立刻掉线，
       # 所以放 named volume 而不是容器可写层（见文件末尾 volumes）。
       RELAY_SESSION_SECRET_FILE: /app/state/session-secret
 
     secrets:
-      - supabase_anon_key
-      - supabase_service_role_key
+      - supabase_publishable_key
+      - supabase_secret_key
       - relay_admin_token
 
     # 要不要把 18086 发布到宿主，取决于前面有没有 TLS 终结：
@@ -276,7 +276,11 @@ secrets:
   # —— 以下三个只在 --profile server 下被用到 ——
   relay_admin_token:
     file: ./secrets/relay-admin-token.txt
-  supabase_anon_key:
-    file: ./secrets/supabase-anon-key.txt
-  supabase_service_role_key:
-    file: ./secrets/supabase-service-role-key.txt
+  # 命名跟 Supabase 控制台的按钮字面一致（Publishable key / Secret keys）。
+  # 早先这里叫 supabase_anon_key / supabase_service_role_key —— 那两个是
+  # **Postgres 角色名**，而 Supabase 已把这套密钥标为 Legacy、2026 年底弃用，
+  # 名字留在文件上会让人以为要去控制台取 Legacy 那把。2026-09-18 改名。
+  supabase_publishable_key:
+    file: ./secrets/supabase-publishable-key.txt
+  supabase_secret_key:
+    file: ./secrets/supabase-secret-key.txt

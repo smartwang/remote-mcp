@@ -265,13 +265,12 @@ async function cleanup(deviceId) {
   if (!deviceId) return;
   try {
     const cfg = require('../src/config');
+    const supa = require('../src/supa');
+    // 走 supa 的 header 构造，别手写 `Authorization: Bearer <key>` ——
+    // 新格式密钥（sb_secret_…）不是 JWT，塞进 Bearer 会被判 Invalid JWT。
     await fetch(`${cfg.SUPABASE_URL}/rest/v1/mcp_devices?id=eq.${deviceId}`, {
       method: 'DELETE',
-      headers: {
-        apikey: cfg.SERVICE_ROLE_KEY,
-        Authorization: `Bearer ${cfg.SERVICE_ROLE_KEY}`,
-        Prefer: 'return=representation',
-      },
+      headers: supa.secretKeyHeaders({ Prefer: 'return=representation' }),
     });
     console.log(`  (已清理自检设备行 ${deviceId})`);
   } catch (err) {

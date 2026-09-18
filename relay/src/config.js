@@ -3,9 +3,10 @@
  * 中继服务配置。
  *
  * 取值优先级：`<KEY>_FILE` > process.env > relay/.env > ../supabase/selfhosted/.env
- * 最后一级直接从 Supabase 的 .env 兜底读取，是为了避免"两处各存一份 ANON_KEY
- * 然后悄悄不一致"——那类问题排查起来非常费劲。**那一级只在源码目录里成立**，
- * 容器部署中考的是前两级（见下）。
+ * 最后一级直接从 Supabase 的 .env 兜底读取，是为了避免"两处各存一份
+ * SUPABASE_PUBLISHABLE_KEY 然后悄悄不一致"——那类问题排查起来非常费劲。
+ * **那一级只在源码目录里成立**，容器部署中考的是前两级（见下）；
+ * 且那一级要按**上游的键名**取，见下面的 UPSTREAM_ENV_ALIAS。
  *
  * `<KEY>_FILE` 是 Docker 惯例（同 `POSTGRES_PASSWORD_FILE`）：值从文件读，
  * **不经过环境变量**，因此不会出现在 `docker inspect` 的明文里。容器部署走这条。
@@ -46,6 +47,26 @@ const supaEnv = parseEnvFile(SUPA_ENV);
 const fileReadErrors = [];
 
 /**
+ * 读上游 Supabase 自托管 `.env` 时用的**别名**：我们的键名 → 上游的键名。
+ *
+ * 上游那份 .env 里的 `ANON_KEY` / `SERVICE_ROLE_KEY` **不是遗留命名，也不能改** ——
+ * 自托管走 HS256 + `JWT_SECRET`，那两个值就是 `{"role":"anon"}` /
+ * `{"role":"service_role"}` 签出来的 JWT，角色名写在令牌里，只能这么叫。
+ * 上游的 compose / envoy 模板正是按这两个名字引用它们的。
+ *
+ * 所以要分清两件事：
+ *   · **我们的**配置面（环境变量、`<KEY>_FILE`、relay/.env）一律用新名 —— 那是给人看的；
+ *   · **读上游 .env 兜底**时按上游的名字取 —— 那是给机器看的，不是可配置项。
+ *
+ * 这条映射**只在读写上游 .env 的那一级生效**，不扩展到前两级，
+ * 所以它不会把 `ANON_KEY` 重新变成一个人可以填的变量名。
+ */
+const UPSTREAM_ENV_ALIAS = {
+  SUPABASE_PUBLISHABLE_KEY: 'ANON_KEY',
+  SUPABASE_SECRET_KEY: 'SERVICE_ROLE_KEY',
+};
+
+/**
  * 从文件读一个值。trim 是必要的：`printf '%s\n'` 与 docker secret 都会带尾换行，
  * 而 Bearer 令牌/nonce 里多一个 \n 会变成一个极难定位的鉴权失败。
  */
@@ -69,7 +90,27 @@ function readSecretFile(file) {
  *
  * 所以只有真正需要"从文件读一个固定密钥"的键列在这里。新增密钥时记得加。
  */
-const FILE_BACKED_KEYS = new Set(['ANON_KEY', 'SERVICE_ROLE_KEY', 'RELAY_ADMIN_TOKEN']);
+const FILE_BACKED_KEYS = new Set([
+  'SUPABASE_PUBLISHABLE_KEY',
+  'SUPABASE_SECRET_KEY',
+  'RELAY_ADMIN_TOKEN',
+]);
+
+/**
+ * 已废弃的旧键名 → 新键名。
+ *
+ * 这里指的不是"Supabase 的旧密钥格式"，而是**本中继自己曾经的变量名**。
+ * 早先照抄了 Supabase 的 `anon` / `service_role` 角色名当变量名，那把密钥
+ * 本身早就换成新格式了，名字却留着 —— 于是"文件名说 anon、内容却是 sb_ 开头"
+ * 这种自相矛盾的东西会一直误导人（包括误以为要去控制台找 Legacy 那把）。
+ *
+ * **不做静默兼容**：旧名一律忽略，只在报了新名缺失之后补一条改名提示。
+ * 静默接受旧名等于同时维护两套命名，那正是这次要消除的东西。
+ */
+const RENAMED_KEYS = {
+  ANON_KEY: 'SUPABASE_PUBLISHABLE_KEY',
+  SERVICE_ROLE_KEY: 'SUPABASE_SECRET_KEY',
+};
 
 function pick(key) {
   if (FILE_BACKED_KEYS.has(key)) {
@@ -80,7 +121,8 @@ function pick(key) {
   if (fromProcess !== undefined && fromProcess !== '') return fromProcess;
   const fromRelay = relayEnv[key];
   if (fromRelay !== undefined && fromRelay !== '') return fromRelay;
-  const fromSupa = supaEnv[key];
+  // 只用这一级走别名 —— 上游 .env 的键名不是我们的配置项。见 UPSTREAM_ENV_ALIAS。
+  const fromSupa = supaEnv[UPSTREAM_ENV_ALIAS[key] || key];
   if (fromSupa !== undefined && fromSupa !== '') return fromSupa;
   return undefined;
 }
@@ -100,8 +142,20 @@ const PUBLIC_SUPABASE_URL = (pick('PUBLIC_SUPABASE_URL') || SUPABASE_URL).replac
 // 中继自己对外暴露的地址，用于拼 device flow 的验证链接。
 const RELAY_PUBLIC_URL = (pick('RELAY_PUBLIC_URL') || `http://${HOST}:${PORT}`).replace(/\/+$/, '');
 
-const ANON_KEY = pick('ANON_KEY');
-const SERVICE_ROLE_KEY = pick('SERVICE_ROLE_KEY');
+/*
+ * Supabase 的两把密钥。**命名跟 Supabase 控制台的按钮字面一致**：
+ *
+ *   SUPABASE_PUBLISHABLE_KEY → Publishable key，值形如 sb_publishable_…
+ *   SUPABASE_SECRET_KEY      → Secret key，      值形如 sb_secret_…
+ *
+ * 这两个名字是 2026-09-18 从 `ANON_KEY` / `SERVICE_ROLE_KEY` 改过来的。
+ * 旧名照抄的是 Postgres 角色名（anon / service_role），而 Supabase 早已把
+ * 密钥体系换掉：旧的 `anon` / `service_role` JWT 被官方标为 **Legacy、
+ * 2026 年底弃用**，取而代之的就是 publishable / secret 这对。
+ * 留着旧变量名只会让人以为该去控制台取 Legacy 那把 —— 所以名字必须跟着换。
+ */
+const SUPABASE_PUBLISHABLE_KEY = pick('SUPABASE_PUBLISHABLE_KEY');
+const SUPABASE_SECRET_KEY = pick('SUPABASE_SECRET_KEY');
 
 // 单租户阶段的遗留默认值。多租户下只在"引导第一个管理员账号"时用到
 // （见 README「迁移到多租户」），不再是所有设备的归属账号。
@@ -216,11 +270,31 @@ const SESSION_SECRET_FILE = pick('RELAY_SESSION_SECRET_FILE') || path.join(RELAY
 
 function validate() {
   const problems = [...fileReadErrors];
-  if (!ANON_KEY) {
-    problems.push('ANON_KEY 缺失（环境变量 / relay/.env / supabase/selfhosted/.env 三处都没有）');
+  if (!SUPABASE_PUBLISHABLE_KEY) {
+    problems.push(
+      'SUPABASE_PUBLISHABLE_KEY 缺失（<KEY>_FILE / 环境变量 / relay/.env / ' +
+        'supabase/selfhosted/.env 都没有）。取自 Supabase 控制台 → Settings → ' +
+        'API Keys → Publishable key，值形如 sb_publishable_…'
+    );
   }
-  if (!SERVICE_ROLE_KEY) {
-    problems.push('SERVICE_ROLE_KEY 缺失（环境变量 / relay/.env / supabase/selfhosted/.env 三处都没有）');
+  if (!SUPABASE_SECRET_KEY) {
+    problems.push(
+      'SUPABASE_SECRET_KEY 缺失（<KEY>_FILE / 环境变量 / relay/.env / ' +
+        'supabase/selfhosted/.env 都没有）。取自 Supabase 控制台 → Settings → ' +
+        'API Keys → Secret keys，值形如 sb_secret_…'
+    );
+  }
+  // 用了旧名就直说改名了 —— 否则现象只是"某个没听过的变量缺失"，
+  // 而真正的原因（照老文档抄的旧名）不会自己浮出来。
+  for (const [oldName, newName] of Object.entries(RENAMED_KEYS)) {
+    for (const probe of [oldName, `${oldName}_FILE`]) {
+      if (process.env[probe] || relayEnv[probe]) {
+        problems.push(
+          `${probe} 已改名为 ${newName}${probe.endsWith('_FILE') ? '_FILE' : ''} —— ` +
+            '旧名不再被读取，请改掉（原因见 config.js 的 RENAMED_KEYS 注释）。'
+        );
+      }
+    }
   }
   // RELAY_PUBLIC_URL 不能是 0.0.0.0。
   //
@@ -286,8 +360,8 @@ module.exports = {
   SUPABASE_URL,
   PUBLIC_SUPABASE_URL,
   RELAY_PUBLIC_URL,
-  ANON_KEY,
-  SERVICE_ROLE_KEY,
+  SUPABASE_PUBLISHABLE_KEY,
+  SUPABASE_SECRET_KEY,
   OWNER_EMAIL,
   OWNER_PASSWORD,
   AUTO_APPROVE,
