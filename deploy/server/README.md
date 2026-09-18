@@ -20,6 +20,42 @@ relay 不执行任何命令，只做鉴权与派发。真正跑命令的是 Wind
 
 ---
 
+## 本机现状：只差三个文件要你填（2026-09-18）
+
+部署目录 `/root/remote-mcp-relay/` 其余都已就绪 —— compose、`.env`（URL 已填、
+自助注册已关、管理员口令已生成）、admin 令牌、WAF 站点
+（`sites-enabled/IF_backend_4` → `127.0.0.1:18086`）、DNS、镜像、迁移 SQL
+与 `migrate.sh` 都在位。**只差下面三个文件**：
+
+| # | 填到哪 | 内容形态 | 从哪拿 |
+|---|---|---|---|
+| 1 | `secrets/supabase-publishable-key.txt` | `sb_publishable_…` | Supabase → Settings → **API Keys** → `API Keys` 页签 → Publishable key |
+| 2 | `secrets/supabase-secret-key.txt` | `sb_secret_…` | 同一个页签 → Secret keys（点 Reveal 才显示） |
+| 3 | `secrets/supabase-db-url.txt` | 整串 URI | Supabase → **Connect** → **Session pooler** → URI |
+
+三个文件都是**单行、只放值**：不要引号、不要 `Bearer ` 前缀、不要行尾注释。
+第三个只给 `./migrate.sh` 建表用，不会进容器。
+
+> ⚠️ 第 3 个别用 **Direct connection**（`db.<ref>.supabase.co`）—— Supabase 对它
+> 只给 AAAA 记录，而这台机器**没有全局 IPv6**，psql 会卡到超时、报错还很难读。
+> Session pooler 有 IPv4。`migrate.sh` 认得出这个形态并直接拒跑。
+
+填完的标准流程：
+
+```bash
+cd /root/remote-mcp-relay
+./migrate.sh        # 建表；幂等，跑几次都行
+./setup.sh          # 体检 + 把 secrets 属主设成 1000:1000
+docker compose up -d
+curl -s http://127.0.0.1:18086/healthz   # db_error 应为 null
+```
+
+`setup.sh` 也支持用环境变量喂值（见其文件头）。手工 `vi` 的路径更短，但
+**改完一定要再跑一次 `setup.sh`** —— 它负责 `chown 1000:1000 secrets/*.txt`。
+漏了这步容器会以 EACCES 无限重启，而日志里只有一句"读不到文件"，很难定位。
+
+---
+
 ## 前置条件
 
 ### 1. Supabase 项目
@@ -32,7 +68,7 @@ relay 不执行任何命令，只做鉴权与派发。真正跑命令的是 Wind
 | `PUBLIC_SUPABASE_URL` | 同上（托管实例这两个同值） | `.env` |
 | publishable key | Settings → **API Keys** → **`API keys`** 页签 → `Publishable key` | `secrets/supabase-publishable-key.txt` |
 | secret key | 同一个页签 → `Secret keys` | `secrets/supabase-secret-key.txt` |
-| 数据库连接串 | Settings → **Database** → Connection string → **Session pooler**（IPv4 可达） | 只在建表时用一次，不落盘 |
+| 数据库连接串 | 顶部 **Connect** → **Session pooler** → URI（IPv4 可达） | `secrets/supabase-db-url.txt`（只给 `migrate.sh` 用） |
 
 ### 密钥：用**新格式**（`sb_publishable_…` / `sb_secret_…`），不要用 Legacy
 
@@ -65,26 +101,45 @@ relay 不执行任何命令，只做鉴权与派发。真正跑命令的是 Wind
 
 ### 2. 建表
 
-数据库是空的，先跑仓库里的 SQL。**顺序不能换**：`schema.sql` 建基础表，
+数据库是空的，先跑迁移。**顺序不能换**：`schema.sql` 建基础表，
 `002` 加多租户，`003` 加 OAuth。
 
 ```bash
-# 在仓库根目录
-CONN='postgresql://postgres.<ref>:<pwd>@aws-0-<region>.pooler.supabase.com:5432/postgres'
-for f in supabase/schema.sql supabase/migrations/002-multi-tenant-auth.sql supabase/migrations/003-oauth-authorization-server.sql; do
-  echo "── $f"
-  docker run --rm -i postgres:15 psql "$CONN" -v ON_ERROR_STOP=1 -q -f - < "$f"
-done
+cd /root/remote-mcp-relay
+printf '%s\n' 'postgresql://postgres.<ref>:<口令>@aws-0-<region>.pooler.supabase.com:5432/postgres' \
+  > secrets/supabase-db-url.txt
+chmod 600 secrets/supabase-db-url.txt
+./migrate.sh
 ```
 
-跑完自检（应当看到七张 `mcp_*` 表，且带 `_oauth_` 的三张存在）：
+`migrate.sh` 做四件事：拒掉 Direct connection 形态、先连通性自检、
+按顺序跑三个文件（`ON_ERROR_STOP=1`，任一失败即停）、最后列出 `public.mcp_*` 核对。
+三个 SQL 都是 `if not exists` / `or replace`，**幂等** —— 跑一半失败、修掉再跑是正常操作。
+
+跑完应当看到七张表：
+
+```
+mcp_api_tokens
+mcp_audit_log
+mcp_devices
+mcp_oauth_clients      ← 以下三张来自 003
+mcp_oauth_codes
+mcp_oauth_grants
+mcp_remote_calls
+```
+
+> 带 `_oauth_` 的三张必须存在。缺了 `003` 的表现是：`/oauth/authorize` 直接 500，
+> 而 ChatGPT 那侧只显示"授权失败"，看不到任何原因。
+
+不想用脚本的话，等价的手工方式（SQL 已随部署目录放在 `db/`）：
 
 ```bash
-docker run --rm -i postgres:15 psql "$CONN" -c "\dt public.mcp*"
+CONN='postgresql://...'
+for f in db/schema.sql db/002-multi-tenant-auth.sql db/003-oauth-authorization-server.sql; do
+  echo "── $f"
+  docker run --rm -i postgres:18-alpine psql "$CONN" -v ON_ERROR_STOP=1 -q -f - < "$f"
+done
 ```
-
-> 这三张 OAuth 表必须存在。缺了 `003` 的表现是：`/oauth/authorize` 直接 500，
-> 而 ChatGPT 那侧只显示"授权失败"，看不到任何原因。
 
 ### 3. 服务器
 
@@ -174,6 +229,43 @@ docker compose logs -f --tail=40 relay
    但把 Host 改写成 `127.0.0.1:18086` 会让某些 WAF 的日志失去取证价值。
 
 TLS 证书必须覆盖 `mcp.example.com`。ChatGPT 侧不接受自签名证书。
+
+5. **如果反代前面还有 Cloudflare，`X-Forwarded-For` 不能当限速依据。**
+   2026-09-18 实测（CF 橙云 + SafeLine，用 `tools/probe-headers.py` 复现）：
+
+   ```
+   $ curl -H "X-Forwarded-For: 1.2.3.4" https://mcp.example.com/
+   源站收到 → X-Forwarded-For: 1.2.3.4,<真实客户端>,<CF 回源 IP>
+              CF-Connecting-IP: <真实客户端>
+   ```
+
+   CF 对 XFF 是**追加**而非覆盖，所以链首那个值来自请求方自己。而中继的
+   `auth.clientIp()` 取 XFF 第一个 —— 拿到的是伪造值。`CF-Connecting-IP`
+   才是 CF 每次覆盖、伪造不了的那个。
+
+   影响面仅限**限速与审计日志**（鉴权不看 IP），所以不是"能绕进来"，而是
+   "能绕过限速去暴力猜 user_code / 撞口令"。加固二选一：
+
+   - 改中继（推荐，与反代配置解耦）：`clientIp()` 里优先读 `cf-connecting-ip`，
+     没有再回落 XFF；
+   - 只在反代侧改：给 `custom_params/backend_4` 加一行
+     `proxy_set_header X-Forwarded-For $http_cf_connecting_ip;`。但它会被
+     SafeLine 的界面保存动作覆写，得记着（且不走 CF 时该头为空，要一起想清楚）。
+
+### Cloudflare 橙云：以下均为**未验证**的风险点
+
+`mcp.example.com` 目前是橙云（解析到 `104.21.x` / `172.67.x`）。实测已确认
+**回源链路正常**（经 CF 访问 `https://mcp.example.com/` 返回 200，
+`cf-cache-status: DYNAMIC`）。但以下几项没验证过，出问题先怀疑它们：
+
+- **人机验证 / 拦截**：CF 的 Bot Fight Mode、或 zone 安全级别调到 High 之后，
+  非浏览器 UA 的请求（ChatGPT 的 connector 正是）可能被 challenge。若 OAuth
+  在 ChatGPT 侧莫名失败而 curl 正常，先查这里。
+- **响应缓冲与长连接**：MCP 走 streamable HTTP。若出现"initialize 成功但后续
+  流断"，试试把这条记录改成 **DNS only（灰云）**，让 CF 只做解析 —— 源站已经有
+  SafeLine 做 TLS 终结，多一层 CF 只是多一个变量。
+- **别让 `/.well-known/*` 与 `/oauth/*` 落进任何缓存规则**。发现文档被缓存后，
+  改配置不会立即生效。
 
 ---
 
