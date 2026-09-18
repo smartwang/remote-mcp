@@ -1,0 +1,5 @@
+# 本机配置（可能含本机路径），不入库
+device.env
+
+# device 的私有副本：node_modules（约 200MB）+ 运行态凭据。都不入库。
+_device/
