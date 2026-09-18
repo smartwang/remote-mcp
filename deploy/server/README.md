@@ -30,37 +30,37 @@ relay 不执行任何命令，只做鉴权与派发。真正跑命令的是 Wind
 |---|---|---|
 | `SUPABASE_URL` | 顶部 **Connect** 对话框，或 Settings → Data API → Project URL | `.env` |
 | `PUBLIC_SUPABASE_URL` | 同上（托管实例这两个同值） | `.env` |
-| anon key | Settings → **API Keys** → `Legacy API keys` 页签 → `anon` `public` | `secrets/supabase-anon-key.txt` |
-| service_role key | 同一个页签 → `service_role` | `secrets/supabase-service-role-key.txt` |
+| publishable key | Settings → **API Keys** → **`API keys`** 页签 → `Publishable key` | `secrets/supabase-anon-key.txt` |
+| secret key | 同一个页签 → `Secret keys` | `secrets/supabase-service-role-key.txt` |
 | 数据库连接串 | Settings → **Database** → Connection string → **Session pooler**（IPv4 可达） | 只在建表时用一次，不落盘 |
 
-### ⚠️ 密钥格式：这一步选错，会得到一个到处报 `Invalid JWT` 却查不出原因的服务
+### 密钥：用**新格式**（`sb_publishable_…` / `sb_secret_…`），不要用 Legacy
 
-Supabase 正在换密钥体系，Settings → API Keys 下现在有**两套格式不同、目前都有效**的密钥：
+取的是 `API keys` 页签，**不是** `Legacy API keys`。旧项目该页签下若显示
+`Create new API keys`，点一次即可 —— 它只是**新增**，不会吊销你现有的 key，
+旧 key 照常有效。新 key 默认名叫 `default`。
 
-| 页签 | 格式 | 本质 |
-|---|---|---|
-| `API keys`（新的） | `sb_publishable_…` / `sb_secret_…` | **不是 JWT**，一串带前缀的令牌 |
-| `Legacy API keys` | `eyJ…`（三段 base64 点分） | JWT |
+**为什么新格式是对的：**
 
-**v1 用 Legacy 那套。** 不是保守，是因为下面第 2 条我验不了：
+1. **Legacy 是官方明确要停用的东西。** 迁移文档原话：anon / service_role
+   "deprecated by the end of 2026"。新部署没有理由从一条弃用路径起步。
+2. **本项目两种格式都支持。** `supa.js` 的 `keyHeaders()` 直接照抄官方 SDK
+   （`@supabase/supabase-js@2.116.0`）的判定规则 —— 只有 `sb_publishable_` /
+   `sb_secret_` 走纯 `apikey`，**其余一律保留 `Authorization: Bearer`**。
+   四种形态都实测过：legacy JWT ✓带 Bearer、`sb_publishable_` ✓不带、
+   `sb_secret_` ✓不带、`sb_temp_` ✓带（上游就是这么定的）。
+3. **device 侧不用改，也不用升级。** 它用的是 `@supabase/supabase-js@2.89.0`，
+   该版本对密钥**不做格式判断、两个头都发** —— 这与 2.116.0 的**默认行为一致**
+   （新版只是额外提供 `omitApiKeyAsBearer` 开关让你能关掉 Bearer 那一份）。
+   即 device 的行为 = 官方当前默认行为。Realtime 那条路走的是 WS 查询参数
+   `?apikey=…`，本来就是新格式该走的位置。
 
-1. **已实测路径**：全部 173 条验收断言都是在 `eyJ…` 上跑的。
-2. **未实测路径**：中继已经改成两种格式都认（`supa.js` 按 `eyJ` 前缀决定是否发
-   `Authorization`），但 **device 侧用的是 `@supabase/supabase-js` 自带的密钥处理逻辑，
-   我这边无法实测**。GoTrue 的 admin 接口（建账号）在新格式下是否也接受只有
-   `apikey` 头的请求，同样没验。
-3. **故障信号极差**：新格式密钥放在 `Authorization: Bearer` 上会被平台判为
-   `Invalid JWT`（官方迁移文档明说："The new secret keys aren't JWTs, so they're
-   rejected there. Send the secret key on the apikey header instead."），
-   而报错里**不会**提示"密钥格式不对"。
-
-Legacy key 在 Dashboard 里被**显式停用**之前一直有效 —— 停用是一个独立动作，
-不会因为"deprecated"自己到期。将来换新格式只需改这两个文件再 `docker compose up -d`，
-**不用重新构建镜像**；但换之前要单独把 device 侧和 GoTrue admin 两条路径各验一遍。
-
-> 两把密钥从**同一个页签**取。跨页签混用不是不能用，但会让上面两条未实测路径
-> 同时上场，出问题时无法二分定位。
+> **万一** device 侧在新格式下连不上（这是唯一没在真 Supabase 上跑过的路径），
+> 回退成本是零：把这两个文件换回 Legacy key 再 `docker compose up -d`，
+> **不用改代码、不用重建镜像**。
+>
+> 反过来说 —— 为了一个"可零成本回退"的风险，从一条**官方已弃用**的凭据路径起步，
+> 是不划算的。先上新格式。
 
 ### 2. 建表
 
@@ -108,9 +108,12 @@ mkdir -p secrets
 # 管理员面令牌。持有者能看到所有租户的设备与审计。
 printf '%s\n' "rmcpadmin_$(openssl rand -hex 24)" > secrets/relay-admin-token.txt
 
-# 从 Supabase 项目拷贝
-printf '%s\n' '<anon key>'         > secrets/supabase-anon-key.txt
-printf '%s\n' '<service_role key>' > secrets/supabase-service-role-key.txt
+# 从 Supabase 项目拷贝（值是新格式 sb_publishable_… / sb_secret_…）
+# 文件名里的 anon / service_role 是历史命名（代码里的变量名也叫 ANON_KEY /
+# SERVICE_ROLE_KEY），**指代的是"低权限那把"和"高权限那把"**，不是要你去
+# Legacy 页签取 key。
+printf '%s\n' 'sb_publishable_...' > secrets/supabase-anon-key.txt
+printf '%s\n' 'sb_secret_...'      > secrets/supabase-service-role-key.txt
 
 chmod 600 secrets/*.txt
 ```
@@ -197,7 +200,9 @@ curl -sS -o /dev/null -D- -X POST https://mcp.example.com/mcp \
 
 ### 接一台 device
 
-device 侧要的是 `PUBLIC_SUPABASE_URL` 和它的 anon key。device 起来后到
+device 侧要的是 `PUBLIC_SUPABASE_URL` 和那把低权限 key —— 它走
+`GET /api/mcp-info` 拿，JSON 字段名就叫 `supabasePublishableKey`
+（这个字段名是既有的，正好对上新的 publishable key）。device 起来后到
 `/console` 批准它 —— 批准动作把设备绑到**当前登录的那个账号**，这就是租户边界。
 
 ---
@@ -243,8 +248,8 @@ DCR 注册并长期复用那个 `client_id`。删了之后用户下一次刷新�
 | 现象 | 大概率原因 |
 |---|---|
 | 容器起不来，日志报 `ANON_KEY 缺失` | secrets 文件没建，或写成 `<KEY>_FILE` 之外的形式 |
-| 一切 Supabase 调用都 401 `Invalid JWT` | 用了 `sb_publishable_…` / `sb_secret_…` 却发到了 `Authorization: Bearer` 上。见上面「密钥格式」 |
-| 只有 device 连不上（中继正常） | `PUBLIC_SUPABASE_URL` 或给 device 的 anon key 不对 —— device 是独立进程，它的报错不会出现在 relay 日志里 |
+| 一切 Supabase 调用都 401 `Invalid JWT` | 密钥值本身有问题（截断、带引号、被停用），或它根本不是这个项目的 key。**注入位置不用你操心** —— `supa.js` 已按官方 SDK 规则按前缀自动决定发不发 Bearer |
+| 只有 device 连不上（中继正常） | `PUBLIC_SUPABASE_URL` 或下发的那把 publishable key 不对 —— device 是独立进程，它的报错不会出现在 relay 日志里 |
 | 日志报 `RELAY_PUBLIC_URL 必填` | `.env` 没填或 compose 没读到（注意要在同目录） |
 | `/console` 登录后立刻掉线 | `RELAY_COOKIE_SECURE=true` 但你在用 http 访问 |
 | ChatGPT 点连接后停在打不开的页面 | `RELAY_PUBLIC_URL` 不是公网 HTTPS |

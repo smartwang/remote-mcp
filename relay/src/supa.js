@@ -71,30 +71,35 @@ async function request(url, { method = 'GET', headers = {}, body, timeoutMs = 30
 }
 
 /**
- * Supabase 密钥的**两种格式注入方式不同**，这是 2026 年迁移期最阴的一个坑。
+ * Supabase 密钥的**两种格式注入方式不同**，规则照抄官方 SDK，不要自己发明。
  *
- * · 旧格式 `anon` / `service_role` 是 **JWT**（`eyJ…`）。平台在 `Authorization`
- *   头里按 JWT 解析，所以必须放 Bearer。
- * · 新格式 `sb_publishable_…` / `sb_secret_…` **不是 JWT**。官方迁移文档原话：
- *   "The new secret keys aren't JWTs, so they're rejected there. Send the secret
- *   key on the apikey header instead." —— 即放在 `Authorization: Bearer` 上会被
- *   判为 `Invalid JWT`。
+ * 依据：`@supabase/supabase-js@2.116.0` 的 `index.mjs`（打包产物第 268-274 行）：
  *
- * 两种格式目前同时有效（Supabase 明说），所以这里按**前缀判断**而不是写死一种。
- * 若把新格式密钥硬塞进 Bearer，症状是一个到处都在报 `Invalid JWT`、
- * 但报错里绝不提"你的密钥格式不对"的鉴权失败 —— 所以宁可条件化。
+ *   New-format Supabase API keys (`sb_publishable_…` / `sb_secret_…`) are not
+ *   JWTs and must never be sent as a Bearer token — they belong only in the
+ *   `apikey` header. All other keys (legacy JWT keys, `sb_temp_…` temporary
+ *   keys, unrecognized `sb_` subtypes) keep the Bearer fallback.
+ *   const isNewApiKey = (key) => key.startsWith("sb_publishable_")
+ *                               || key.startsWith("sb_secret_");
  *
- * `Authorization` 只在**没有调用方自带**时才补：PostgREST 换角色靠它，
- * 调用方要覆盖就必须让 `extra` 生效。
+ * 为什么必须照抄而不是"自己判断像不像 JWT"：**保守在这件事上不是安全的**。
+ * 判据比上游严，遇到上游认识而我们不认识的新前缀时，我们会漏发 Bearer；
+ * 判据比上游松，则会把非 JWT 塞进 Bearer。两种偏差都只在**将来**才暴露，
+ * 而暴露时的症状是 `Invalid JWT` —— 报错里不会提密钥格式，也没有指向性。
+ * 唯一稳的做法是把上游的判据抄过来，等它变我们再跟着变。
+ *
+ * `Authorization` 只在**调用方自带**时才不覆盖：PostgREST 换角色靠这个头。
  */
+const isNewApiKey = (key) =>
+  typeof key === 'string' && (key.startsWith('sb_publishable_') || key.startsWith('sb_secret_'));
+
 function keyHeaders(key, extra = {}) {
   const headers = {
     apikey: key,
     'Content-Type': 'application/json',
     ...extra,
   };
-  const isJwtLike = typeof key === 'string' && /^ey[A-Za-z0-9_-]+\./.test(key);
-  if (isJwtLike && headers.Authorization === undefined) {
+  if (headers.Authorization === undefined && !isNewApiKey(key)) {
     headers.Authorization = `Bearer ${key}`;
   }
   return headers;
