@@ -15,6 +15,15 @@
 
 FROM node:22-alpine
 
+# OCI 标签。org.opencontainers.image.source 不只是注释 —— GHCR 靠它把这个
+# package 认领给仓库，这样镜像页会显示仓库 README，也才有"这张镜像从哪来的"。
+LABEL org.opencontainers.image.title="remote-mcp-relay" \
+      org.opencontainers.image.description="自建 MCP 中继：多租户 OAuth 2.1 鉴权 + 按租户设备路由" \
+      org.opencontainers.image.source="https://github.com/smartwang/remote-mcp" \
+      org.opencontainers.image.url="https://github.com/smartwang/remote-mcp" \
+      org.opencontainers.image.documentation="https://github.com/smartwang/remote-mcp/blob/main/relay/README.md" \
+      org.opencontainers.image.vendor="smartwang"
+
 WORKDIR /app
 
 # 源码。catalog.json 是工具表，已纳入版本控制，必须随镜像走 ——
