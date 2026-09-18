@@ -1,0 +1,10 @@
+# 这个仓库的产出要跑在 Linux 容器里（Supabase 栈、tunnel-client 镜像），
+# 所以默认把所有文本按 LF 检出 —— 避免本机 core.autocrlf=true 让
+# volumes/ 下的 yaml / sql / 配置在检出后变成 CRLF，喂给容器时出问题。
+* text=auto eol=lf
+
+# Windows 专用脚本反过来：.cmd 里的 goto/label 遇到 LF 会解析出错，
+# PowerShell 虽然两种都吃，但按平台惯例保持 CRLF。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf

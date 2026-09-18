@@ -1,0 +1,46 @@
+# =============================================================================
+# remote-mcp
+#
+# 只提交「源码 + 配置模板 + 文档」。
+# 下载产物（约 570MB）、运行时数据（68MB+）、凭据一律不入库 ——
+# 被忽略的部分如何重建，见 README.md「从零重建」一节。
+# =============================================================================
+
+# ---------- 凭据：任何情况下都不入库 ----------
+# 覆盖 docker/.env、supabase/selfhosted/.env、windows/server.env、
+# docker/secrets/control-plane.key
+# *.env.example 是模板，不受影响（不以 .env 结尾）
+.env
+*.env
+*.key
+
+# ---------- 临时探测产物 ----------
+# _scratch/ 下有明文 token（win-token.txt）与调试日志，整个排除
+_scratch/
+**/_scratch/
+
+# ---------- tunnel-client 发行包（509MB）----------
+# 重建成品的正规路径是 docker/Dockerfile 直接拉
+# ghcr.io/openai/tunnel-client:v0.0.14，不需要本地这份。
+# 若确需本地二进制，按 README 重新下载并用 SHA256SUMS.txt 校验。
+tunnel/dist/*
+!tunnel/dist/SHA256SUMS.txt
+
+# ---------- supabase 官方 docker 目录（稀疏克隆，5.9MB）----------
+# 重建命令见 README「从零重建」第 2 步。
+# selfhosted/ 已是从这里复制出来的独立副本，不再依赖 _src。
+supabase/_src/
+
+# ---------- Supabase 运行时数据（Postgres data dir，68MB+）----------
+# 含真实业务数据（设备凭据、调用记录）。绝对不入库 ——
+# 表结构由 supabase/schema.sql 重建，数据不迁移。
+supabase/selfhosted/volumes/db/data/
+
+# ---------- 归档里的二进制（59MB）----------
+# 保留 README.txt 作为「这些二进制从哪来」的线索
+_archive/wsl-bare-metal/bin/*
+!_archive/wsl-bare-metal/bin/README.txt
+
+# ---------- Node / 日志 ----------
+node_modules/
+*.log

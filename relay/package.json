@@ -1,0 +1,17 @@
+{
+  "name": "remote-mcp-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "自建版 mcp.desktopcommander.app 等价物：ChatGPT 的 HTTP MCP 端点 + DesktopCommander device 进程的中继",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "catalog": "node tools/gen-catalog.js",
+    "probe:realtime": "node tools/probe-realtime.js",
+    "smoke": "node tools/smoke.js"
+  },
+  "dependencies": {}
+}
