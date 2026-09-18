@@ -1137,6 +1137,35 @@ function main() {
       log('   ──────────────────────────────────────────────────────');
     }
     log('');
+
+    // 启动体检：库里一个账号都没有 + 自助注册已关闭 = 没人能登录控制台，
+    // 而登录控制台是 OAuth 授权流程的必经一步（ChatGPT 首次调用工具 →
+    // 浏览器打开授权页 → 登录 → 同意）。此时部署是死锁的，但现象只是
+    // "登录不进去"，看不出是"账号根本不存在"。
+    //
+    // 只在启动时检测、不自动建号：RELAY_OWNER_PASSWORD 有公开默认值，
+    // 自动建等于用一个人人皆知的密码开管理员入口。给指令，不替他决定。
+    //
+    // 不 await，不阻塞 listen；失败静默 —— 表还没建时 healthz 已经会报 db_error。
+    void (async () => {
+      try {
+        if (await supa.auth.hasAnyUser()) return;
+        if (cfg.ALLOW_SIGNUP) {
+          log('   账号           库里为空 —— 自助注册已开启，可去 /signup 注册');
+          return;
+        }
+        log('   ──────────────────────────────────────────────────────');
+        log('   ⚠ 库里没有任何账号，且自助注册已关闭（RELAY_ALLOW_SIGNUP=false）。');
+        log('     没有人能登录控制台，而登录是 OAuth 授权流程的必经一步 ——');
+        log('     ChatGPT 走到授权页会卡住，且看起来像"密码错"。');
+        log('     建一个账号：');
+        log('       docker compose exec -T relay node tools/create-account.js');
+        log('   ──────────────────────────────────────────────────────');
+        log('');
+      } catch {
+        /* 表还没建 / 网络不通：不打扰启动。healthz 会如实报 db_error */
+      }
+    })();
   });
 
   for (const sig of ['SIGINT', 'SIGTERM']) {

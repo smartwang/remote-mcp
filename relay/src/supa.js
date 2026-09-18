@@ -197,6 +197,25 @@ const auth = {
     return data;
   },
 
+  /**
+   * 库里是否至少有一个账号。
+   *
+   * 存在的唯一理由是启动体检：`RELAY_ALLOW_SIGNUP=false` 时服务端**没有任何**建号
+   * 路径（唯一的 ensureUser 调用点在 deviceflow 的 AUTO_APPROVE 分支，那只在本地
+   * 联调开），而登录控制台又是 OAuth 授权流程的必经一步 —— 于是全新部署必然卡死，
+   * 且现象是"授权页登录不进去"，看不出是"账号根本不存在"。
+   *
+   * 只取 1 条，因为要回答的是"有没有"，不是"有几个"。
+   */
+  async hasAnyUser({ timeoutMs = 20000 } = {}) {
+    const { data } = await request(`${cfg.SUPABASE_URL}/auth/v1/admin/users?page=1&per_page=1`, {
+      headers: secretKeyHeaders(),
+      timeoutMs,
+    });
+    const users = data?.users || (Array.isArray(data) ? data : []);
+    return users.length > 0;
+  },
+
   /** password grant 换取完整 session（含 refresh_token）。 */
   async signInWithPassword(email, password) {
     // 注意：这个调用要用 anon key（模拟普通客户端），而不是 service_role。

@@ -119,13 +119,21 @@ node tools/probe-realtime.js     # 上游体检：PostgREST / GoTrue / Realtime 
 npm start                        # 起中继
 node tools/smoke.js              # 中继自检：device flow 全流程 + MCP 端点
 
-# 5) 在设备上接入
+# 5) 建一个控制台账号（**必需，别跳**）
+#    关掉自助注册后，服务端没有任何别的建号入口，而登录控制台是 OAuth
+#    授权流程的必经一步 —— 没账号，ChatGPT 走到授权页就卡住，且看起来
+#    像"密码错"。脚本是幂等的：账号已存在不会改密码。
+node tools/create-account.js     # 用 RELAY_OWNER_EMAIL / RELAY_OWNER_PASSWORD
+#    容器部署：docker compose exec -T relay node tools/create-account.js
+#    改口令：  ... --set-password --password-stdin
+
+# 6) 在设备上接入
 #    Windows (cmd)：
 #      set MCP_SERVER_URL=http://127.0.0.1:18086
 #      npx @wonderwhy-er/desktop-commander@latest remote
 #    然后浏览器打开 http://127.0.0.1:18086/device 点批准（**需先登录控制台**）
 
-# 6) 多租户验收（48 条对抗性断言，约 6 秒）
+# 7) 多租户验收（48 条对抗性断言，约 6 秒）
 node tools/test-tenant-isolation.js
 ```
 
@@ -133,6 +141,11 @@ node tools/test-tenant-isolation.js
 > 目录按序号应用，`public.schema_migrations` 记账 + sha256 校验和防篡改，
 > 每个迁移单事务、已应用的跳过），后者管**初始**建表。
 > 全新部署两个都跑；已有部署只需跑 migrations。
+
+> 第 5 步为什么不能省：中继启动时会检测"库里一个账号都没有 + 自助注册已关闭"，
+> 状态是**死锁**（登录不进去，而登录又是建号之外的唯一入口）。它只打印提示、
+> 不自动建号 —— 因为 `RELAY_OWNER_PASSWORD` 有公开默认值，自动建等于用一个人人
+> 皆知的密码开管理员入口。建号这一步刻意留给运维。
 
 ## 端点契约
 

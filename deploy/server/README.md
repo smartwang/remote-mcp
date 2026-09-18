@@ -290,6 +290,23 @@ curl -sS -o /dev/null -D- -X POST https://mcp.example.com/mcp \
 然后浏览器打开 `https://mcp.example.com/console`，用 `RELAY_OWNER_EMAIL` /
 `RELAY_OWNER_PASSWORD` 登录，**立刻改掉口令**。
 
+> ⚠️ **`RELAY_OWNER_EMAIL` 那个账号不会自动创建。** 关掉自助注册之后，服务端
+> 没有任何建号入口 —— `/signup` 返回 403，而 `ensureUser()` 唯一的调用点在
+> device flow 的 `AUTO_APPROVE` 分支里（那只在本地联调开）。所以**先建号再登录**：
+>
+> ```bash
+> cd /root/remote-mcp-relay
+> docker compose exec -T relay node tools/create-account.js
+> ```
+>
+> 否则现象是"登录页一直说密码错"，而真实原因是账号根本不存在。这一步不是可选的：
+> 登录控制台是 OAuth 授权流程的**必经一步**（ChatGPT 首次调用工具 → 浏览器打开
+> 授权页 → 登录 → 同意），没有账号 = ChatGPT 走到授权页就卡住。
+>
+> 脚本是幂等的（账号已存在**不会**改口令，避免重跑时把在用的口令换掉）；
+> 要改口令显式加 `--set-password --password-stdin`。
+> 中继启动时若检测到"库里无账号 + 自助注册已关闭"，会直接把上面这条命令打进日志。
+
 ### 接一台 device
 
 device 侧要的是 `PUBLIC_SUPABASE_URL` 和那把低权限 key —— 它走
