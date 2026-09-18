@@ -70,22 +70,44 @@ async function request(url, { method = 'GET', headers = {}, body, timeoutMs = 30
   return { status: res.status, headers: res.headers, data: parsed };
 }
 
-function serviceHeaders(extra = {}) {
-  return {
-    apikey: cfg.SERVICE_ROLE_KEY,
-    Authorization: `Bearer ${cfg.SERVICE_ROLE_KEY}`,
+/**
+ * Supabase 密钥的**两种格式注入方式不同**，这是 2026 年迁移期最阴的一个坑。
+ *
+ * · 旧格式 `anon` / `service_role` 是 **JWT**（`eyJ…`）。平台在 `Authorization`
+ *   头里按 JWT 解析，所以必须放 Bearer。
+ * · 新格式 `sb_publishable_…` / `sb_secret_…` **不是 JWT**。官方迁移文档原话：
+ *   "The new secret keys aren't JWTs, so they're rejected there. Send the secret
+ *   key on the apikey header instead." —— 即放在 `Authorization: Bearer` 上会被
+ *   判为 `Invalid JWT`。
+ *
+ * 两种格式目前同时有效（Supabase 明说），所以这里按**前缀判断**而不是写死一种。
+ * 若把新格式密钥硬塞进 Bearer，症状是一个到处都在报 `Invalid JWT`、
+ * 但报错里绝不提"你的密钥格式不对"的鉴权失败 —— 所以宁可条件化。
+ *
+ * `Authorization` 只在**没有调用方自带**时才补：PostgREST 换角色靠它，
+ * 调用方要覆盖就必须让 `extra` 生效。
+ */
+function keyHeaders(key, extra = {}) {
+  const headers = {
+    apikey: key,
     'Content-Type': 'application/json',
     ...extra,
   };
+  const isJwtLike = typeof key === 'string' && /^ey[A-Za-z0-9_-]+\./.test(key);
+  if (isJwtLike && headers.Authorization === undefined) {
+    headers.Authorization = `Bearer ${key}`;
+  }
+  return headers;
 }
 
+/** service_role / sb_secret_… —— 绕过 RLS，只能出现在受控后端。 */
+function serviceHeaders(extra = {}) {
+  return keyHeaders(cfg.SERVICE_ROLE_KEY, extra);
+}
+
+/** anon / sb_publishable_… —— 低权限，用于模拟普通客户端。 */
 function anonHeaders(extra = {}) {
-  return {
-    apikey: cfg.ANON_KEY,
-    Authorization: `Bearer ${cfg.ANON_KEY}`,
-    'Content-Type': 'application/json',
-    ...extra,
-  };
+  return keyHeaders(cfg.ANON_KEY, extra);
 }
 
 /* ------------------------------------------------------------------ PostgREST */

@@ -26,12 +26,41 @@ relay 不执行任何命令，只做鉴权与派发。真正跑命令的是 Wind
 
 需要一个 Supabase 实例（云或自建都行，本目录按**云托管**写）。拿到四样东西：
 
-| 用途 | 从哪拿 |
-|---|---|
-| `SUPABASE_URL` | 项目 Settings → API → Project URL |
-| anon key | Settings → API → Project API keys → `anon` `public` |
-| service_role key | 同上 → `service_role` |
-| 数据库连接串 | Settings → Database → Connection string → **Session pooler**（IPv4 可用） |
+| 用途 | 从哪拿 | 填到哪 |
+|---|---|---|
+| `SUPABASE_URL` | 顶部 **Connect** 对话框，或 Settings → Data API → Project URL | `.env` |
+| `PUBLIC_SUPABASE_URL` | 同上（托管实例这两个同值） | `.env` |
+| anon key | Settings → **API Keys** → `Legacy API keys` 页签 → `anon` `public` | `secrets/supabase-anon-key.txt` |
+| service_role key | 同一个页签 → `service_role` | `secrets/supabase-service-role-key.txt` |
+| 数据库连接串 | Settings → **Database** → Connection string → **Session pooler**（IPv4 可达） | 只在建表时用一次，不落盘 |
+
+### ⚠️ 密钥格式：这一步选错，会得到一个到处报 `Invalid JWT` 却查不出原因的服务
+
+Supabase 正在换密钥体系，Settings → API Keys 下现在有**两套格式不同、目前都有效**的密钥：
+
+| 页签 | 格式 | 本质 |
+|---|---|---|
+| `API keys`（新的） | `sb_publishable_…` / `sb_secret_…` | **不是 JWT**，一串带前缀的令牌 |
+| `Legacy API keys` | `eyJ…`（三段 base64 点分） | JWT |
+
+**v1 用 Legacy 那套。** 不是保守，是因为下面第 2 条我验不了：
+
+1. **已实测路径**：全部 173 条验收断言都是在 `eyJ…` 上跑的。
+2. **未实测路径**：中继已经改成两种格式都认（`supa.js` 按 `eyJ` 前缀决定是否发
+   `Authorization`），但 **device 侧用的是 `@supabase/supabase-js` 自带的密钥处理逻辑，
+   我这边无法实测**。GoTrue 的 admin 接口（建账号）在新格式下是否也接受只有
+   `apikey` 头的请求，同样没验。
+3. **故障信号极差**：新格式密钥放在 `Authorization: Bearer` 上会被平台判为
+   `Invalid JWT`（官方迁移文档明说："The new secret keys aren't JWTs, so they're
+   rejected there. Send the secret key on the apikey header instead."），
+   而报错里**不会**提示"密钥格式不对"。
+
+Legacy key 在 Dashboard 里被**显式停用**之前一直有效 —— 停用是一个独立动作，
+不会因为"deprecated"自己到期。将来换新格式只需改这两个文件再 `docker compose up -d`，
+**不用重新构建镜像**；但换之前要单独把 device 侧和 GoTrue admin 两条路径各验一遍。
+
+> 两把密钥从**同一个页签**取。跨页签混用不是不能用，但会让上面两条未实测路径
+> 同时上场，出问题时无法二分定位。
 
 ### 2. 建表
 
@@ -214,6 +243,8 @@ DCR 注册并长期复用那个 `client_id`。删了之后用户下一次刷新�
 | 现象 | 大概率原因 |
 |---|---|
 | 容器起不来，日志报 `ANON_KEY 缺失` | secrets 文件没建，或写成 `<KEY>_FILE` 之外的形式 |
+| 一切 Supabase 调用都 401 `Invalid JWT` | 用了 `sb_publishable_…` / `sb_secret_…` 却发到了 `Authorization: Bearer` 上。见上面「密钥格式」 |
+| 只有 device 连不上（中继正常） | `PUBLIC_SUPABASE_URL` 或给 device 的 anon key 不对 —— device 是独立进程，它的报错不会出现在 relay 日志里 |
 | 日志报 `RELAY_PUBLIC_URL 必填` | `.env` 没填或 compose 没读到（注意要在同目录） |
 | `/console` 登录后立刻掉线 | `RELAY_COOKIE_SECURE=true` 但你在用 http 访问 |
 | ChatGPT 点连接后停在打不开的页面 | `RELAY_PUBLIC_URL` 不是公网 HTTPS |
