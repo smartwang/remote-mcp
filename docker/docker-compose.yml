@@ -1,35 +1,165 @@
-# Docker Compose 部署：tunnel-client（+ 可选容器内 MCP server）
+# 控制面部署单元：relay（主服务）+ tunnel-client（边车）
 #
-# 两种模式，靠 .env 切换，compose 文件不用改：
+# ┌─ 服务器 / 任意宿主机 ──────────────────────────────┐
+# │   relay         ← 主体：鉴权、租户隔离、派发         │
+# │     └ tunnel    ← 边车：把 relay 接到 OpenAI 控制面   │
+# └────────────────────────────────────────────────────┘
+#                     ↑ 只出站
+# Windows 机器：device 进程（DesktopCommander remote 模式）
 #
-#   【stdio 模式】MCP server 与 tunnel-client 同容器（默认）
-#       MCP_COMMAND=node /app/server.js
-#       → run_command 执行**容器内** shell，宿主文件靠 volume 挂载
+# relay 是**服务端组件**，不是"跑在 Windows 上的本地服务"。它不执行任何命令，
+# 只在 Supabase 与调用方之间做鉴权与派发，所以没有任何理由必须和 device 同机 ——
+# 同机会造成权限放大（见 relay/README.md「已知约束」）。
 #
-#   【windows 模式】MCP server 跑在 Windows 宿主，容器只做隧道
-#       MCP_COMMAND=                                     ← 必须留空，否则报 duplicate channel "main"
-#       MCP_SERVER_URL=http://host.docker.internal:18090/t/<token>/mcp
-#       → run_powershell / run_cmd 执行**真实 Windows** 命令
-#       详见 ../windows/README.md
+# ---------------------------------------------------------------------------
+# 两种形态，本文件同时支持，靠 profile + .env 切换：
 #
-# 快速开始
-#   1) cp .env.example .env，填 CONTROL_PLANE_TUNNEL_ID
-#   2) printf '%s\n' 'sk-你的RuntimeAPIKey' > secrets/control-plane.key && chmod 600 secrets/control-plane.key
-#   3) docker compose up -d --build
-#   4) docker compose logs -f tunnel          # 看它有没有连上控制面
-#   5) curl -fsS http://127.0.0.1:18080/readyz
+#   【服务器形态】relay 和 tunnel 都在这里，作为同一个单元部署
+#       docker compose --profile server up -d
+#       MCP_SERVER_URL=http://relay:18086/mcp          ← 用服务名，不走宿主
+#       RELAY_PUBLIC_URL=https://mcp.example.com       ← device flow 的验证链接靠它
+#
+#   【本机开发形态】中继直接跑在宿主上（node src/index.js），这里只起隧道
+#       docker compose up -d
+#       MCP_SERVER_URL=http://host.docker.internal:18086/mcp
+#
+#   差别只有 MCP_SERVER_URL 一个变量 —— relay 服务被 profile 挡住，
+#   所以开发形态下不会多起一个中继去抢宿主上的 18086 端口。
+#
+# 快速开始（服务器形态）
+#   1) cp ../relay/.env.example .env，按 .env.example 里的说明填
+#   2) 建 secrets/：
+#        printf '%s\n' 'sk-你的RuntimeAPIKey'        > secrets/control-plane.key
+#        printf '%s\n' "$(openssl rand -hex 32)"     > secrets/relay-admin-token.txt
+#        printf '%s\n' '<supabase anon key>'         > secrets/supabase-anon-key.txt
+#        printf '%s\n' '<supabase service_role key>' > secrets/supabase-service-role-key.txt
+#        chmod 600 secrets/*
+#   3) docker compose --profile server up -d --build
+#   4) curl -fsS http://127.0.0.1:18080/readyz     # 隧道就绪
+#      curl -fsS http://127.0.0.1:18086/healthz    # 中继就绪
 #
 # 端口说明
-#   容器内固定 8080。宿主侧默认 18080 —— 因为宿主 8080 已被
-#   cdj-local-deploy-public-api-1 占用（不是 Docker Desktop 自己）。
-#   只绑 127.0.0.1：官方明确提醒健康端口不要暴露到非可信网络。
+#   容器内固定 8080（隧道健康页）/ 18086（中继）。
+#   宿主侧隧道默认 18080 —— 因为宿主 8080 已被 cdj-local-deploy-public-api-1 占用。
+#   隧道健康端口只绑 127.0.0.1：官方明确提醒不要暴露到非可信网络。
+#   relay 的 18086 见下面的注释 —— 它要不要发布取决于前面有没有 TLS 终结。
 #
-# 顺手一提：健康端口除了 /readyz 还挂了内置 Web UI（/ui）和 /metrics，
-# 想看运行态就把 18080 转出来访问 http://localhost:18080/ui
+# 关于项目名：仍叫 remote-mcp-tunnel 是历史遗留（当时只有隧道）。
+# 改名会让正在运行的容器变成孤儿项目，需要先 docker rm -f，所以先留着。
 
 name: remote-mcp-tunnel
 
 services:
+  # ---------------------------------------------------------------------------
+  # relay —— 主服务。鉴权、租户隔离、调用派发。
+  #
+  # 零依赖 Node，镜像里没有 npm install（见 relay/Dockerfile）。
+  # ---------------------------------------------------------------------------
+  relay:
+    # 本机开发时中继跑在宿主上，这个服务不该起 —— 否则会去抢 18086 端口。
+    profiles: ["server"]
+    build:
+      context: ../relay
+      dockerfile: Dockerfile
+    image: remote-mcp-relay:local
+    container_name: remote-mcp-relay
+    restart: unless-stopped
+
+    environment:
+      # RELAY_HOST 镜像里已经是 0.0.0.0，这里显式写出只为可读性
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: "18086"
+
+      # device flow 的验证链接与 OAuth 发现端点都要靠它拼绝对地址。
+      # 服务器形态**必须**显式设置 —— 猜不出来，猜错的表现是 device 授权链接指向 localhost。
+      #
+      # 这里刻意用 `-` 而不是 `:?`：compose 的 `:?` 插值对**所有**服务生效、
+      # 不受 profile 限制，用它会连带把本机开发形态也一起弄得起不来。
+      # 所以"必须有值"这件事交给 relay 自己判（见 config.js 的 securityWarnings）。
+      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL-http://127.0.0.1:18086}
+
+      # —— 安全姿态：服务器形态的默认值一律是"紧"的 ——
+      # 本机开发用 relay/.env 里的 false，两边互不干扰。
+      #
+      # 注意这里**没有** RELAY_REQUIRE_AUTH —— 那个开关已被删除。
+      # /mcp 现在无条件要求令牌，唯一的身份来源是 Authorization 头
+      # （OAuth 签发的，或控制台人工创建的）。见 relay/src/config.js 的说明。
+      RELAY_COOKIE_SECURE: ${RELAY_COOKIE_SECURE:-true}
+      RELAY_ALLOW_SIGNUP: ${RELAY_ALLOW_SIGNUP:-false}
+      # 前面有 TLS 终结（反代）时才是 true —— 否则 XFF 可以被伪造，
+      # 限速按伪造的 IP 记就等于没有限速。
+      RELAY_TRUST_PROXY: ${RELAY_TRUST_PROXY:-true}
+      RELAY_ROUTE_POLICY: ${RELAY_ROUTE_POLICY:-auto-single}
+
+      # 遗留单租户账号：多租户下只在"引导第一个管理员账号"时用到。
+      RELAY_OWNER_EMAIL: ${RELAY_OWNER_EMAIL:-device@remote-mcp.local}
+
+      # —— Supabase ——
+      # 中继自己访问用的地址。与 Supabase 同机时用 host.docker.internal
+      # （原生 Linux 宿主需要下面的 extra_hosts）；用托管实例就填公网地址。
+      SUPABASE_URL: ${SUPABASE_URL:-http://host.docker.internal:8000}
+      # 下发给 device 的地址。device 在别的机器上，所以必须是 device 能访问到的 URL，
+      # 允许和上面不同（例如中继走内网、device 走公网域名）。
+      # 服务器形态**必须**显式设置；同上的理由，不用 `:?`。
+      PUBLIC_SUPABASE_URL: ${PUBLIC_SUPABASE_URL-http://host.docker.internal:8000}
+
+      # 密钥走文件，不走环境变量 —— 环境变量会出现在 docker inspect 的明文里。
+      # 读取由 relay/src/config.js 的 <KEY>_FILE 约定支持。
+      ANON_KEY_FILE: /run/secrets/supabase_anon_key
+      SERVICE_ROLE_KEY_FILE: /run/secrets/supabase_service_role_key
+      RELAY_ADMIN_TOKEN_FILE: /run/secrets/relay_admin_token
+      # 会话签名密钥：一旦重新生成，所有已登录用户立刻掉线，
+      # 所以放 named volume 而不是容器可写层（见文件末尾 volumes）。
+      RELAY_SESSION_SECRET_FILE: /app/state/session-secret
+
+    secrets:
+      - supabase_anon_key
+      - supabase_service_role_key
+      - relay_admin_token
+
+    # 要不要把 18086 发布到宿主，取决于前面有没有 TLS 终结：
+    #   - 有反代（推荐）：保持注释状态，让反代通过 compose 网络直连 relay:18086，
+    #     中继端口不出现在宿主上。
+    #   - 没有反代、只是自己用：取消注释。**只绑 127.0.0.1**，像隧道那样 ——
+    #     绑 0.0.0.0 会让 /console 与 /api/mcp-info 对局域网敞开。
+    #
+    # 当前选择：本机自用、无 TLS 反代 → 已发布，且只绑 127.0.0.1。
+    # 宿主浏览器要访问 /console 与 /admin，必须发布这个端口；
+    # 隧道不依赖它（走 compose 网络内的 relay:18086）。
+    ports:
+      - "127.0.0.1:18086:18086"
+
+    volumes:
+      # 只放 .session-secret 这一个文件。用卷而不是可写层，
+      # 是为了让中继重启/重建后已登录的会话不失效。
+      - relay_state:/app/state
+
+    # 原生 Linux 宿主上 host.docker.internal 不会自动存在。
+    # 注意它解析成 IPv6 —— 这也是 windows/server.js 默认绑双栈 :: 的原因。
+    # Docker Desktop（Windows/macOS）自带，重复声明也无害。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:18086/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # tunnel-client —— relay 的边车。把 relay 接到 OpenAI 控制面。
+  # ---------------------------------------------------------------------------
   tunnel:
     build:
       context: .
@@ -40,9 +170,21 @@ services:
     container_name: remote-mcp-tunnel
     restart: unless-stopped
 
+    # relay 被 profile 挡住 → 不能写裸的 `depends_on: relay`（compose 不允许依赖
+    # 被 profile 禁用的服务，会连开发形态一起弄得起不来）。用 `required: false`：
+    # server 形态下等 relay 健康再起隧道；开发形态下这个依赖被忽略。
+    #
+    # 为什么必须有（实测教训）：没有排序时两个容器同时起，隧道会在 relay 就绪前
+    # 探测 MCP server 失败，而它**不会自行重试** —— /readyz 会一直停在
+    # "oauth discovery failed: connection refused"，必须手动 restart 隧道容器。
+    depends_on:
+      relay:
+        condition: service_healthy
+        required: false
+
     # Docker Desktop 自带 host.docker.internal（解析到 192.168.65.254），不用管。
     # 换成原生 Linux 宿主（VPS）时才需要下面这行 —— 注意它会把解析结果变成 IPv6，
-    # 所以 MCP server 必须监听双栈（windows/server.js 默认就是 ::）。
+    # 所以 MCP server 必须监听双栈。
     # extra_hosts:
     #   - "host.docker.internal:host-gateway"
 
@@ -61,11 +203,30 @@ services:
       # 用 `-` 而不是 `:-`：空字符串要能原样传进去，否则切不到 windows 模式。
       # 空值会被 tunnel-client 当作"未设置"，实测有效。
       MCP_COMMAND: ${MCP_COMMAND-node /app/server.js}
-      MCP_SERVER_URL: ${MCP_SERVER_URL-}
+      #
+      # 默认值是**服务器形态**（中继是同 compose 的邻服务，用服务名）。
+      # 本机开发形态（中继跑在宿主上）必须在 .env 里显式覆盖成：
+      #   MCP_SERVER_URL=http://host.docker.internal:18086/mcp
+      MCP_SERVER_URL: ${MCP_SERVER_URL-http://relay:18086/mcp}
 
       # 下面两个只对容器内那个 MCP server 有意义（stdio 模式）
       MCP_SHELL: /bin/bash
       MCP_SCOPE: container
+
+      # —— 出站静态头：中继的租户令牌在这里注入 ——
+      #
+      # 这是「给 MCP server 加静态凭据」的**唯一受支持位置**（不是 ChatGPT
+      # connector 的认证下拉 —— 那里只有 OAuth / 无身份验证 / 混合，没有 API key）。
+      # 官方文档：tunnel-client-v0.0.14-all/docs/configuration.md 的
+      # “Static MCP headers”，作用域仅限「→ 配置的 MCP server 源」这一跳，
+      # **不发往 OpenAI 控制面**。
+      #
+      # 留空 = 不注入任何头（单租户/未启用多租户时的形态）。
+      # 启用多租户时在 .env 里设：
+      #   MCP_EXTRA_HEADERS=Authorization: file:/run/secrets/relay_mcp_token
+      #
+      # 用 `-` 而不是 `:-`：空字符串要能原样传进去。
+      MCP_EXTRA_HEADERS: ${MCP_EXTRA_HEADERS-}
 
     # api key 走文件引用：不出现在环境变量里，也不在 docker inspect 的明文里
     command:
@@ -75,6 +236,11 @@ services:
 
     secrets:
       - control_plane_key
+      # 中继的租户令牌。内容是完整头值 `Bearer rmcp_<prefix>_<secret>` ——
+      # `file:` 是整值匹配，所以前缀必须写在文件里，不能写在 compose 里。
+      # 由 `node relay/tools/mint-tunnel-token.js` 生成。
+      # 未启用 MCP_EXTRA_HEADERS 时该文件不会被读取（留空文件也安全）。
+      - relay_mcp_token
 
     ports:
       - "127.0.0.1:${HEALTH_PORT:-18080}:8080"
@@ -98,6 +264,19 @@ services:
         max-size: "10m"
         max-file: "3"
 
+volumes:
+  # 只存 .session-secret。见 relay 服务的 RELAY_SESSION_SECRET_FILE。
+  relay_state:
+
 secrets:
   control_plane_key:
     file: ./secrets/control-plane.key
+  relay_mcp_token:
+    file: ./secrets/relay-mcp-token.txt
+  # —— 以下三个只在 --profile server 下被用到 ——
+  relay_admin_token:
+    file: ./secrets/relay-admin-token.txt
+  supabase_anon_key:
+    file: ./secrets/supabase-anon-key.txt
+  supabase_service_role_key:
+    file: ./secrets/supabase-service-role-key.txt

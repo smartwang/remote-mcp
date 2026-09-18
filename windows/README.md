@@ -142,10 +142,21 @@ hostname      : DESKTOP-4L9V2ID
 
 真实环境变量优先级高于 `server.env`，便于临时覆盖。
 
-### 为什么用路径里的 token，而不是请求头
+### 为什么用路径里的 token
 
-`tunnel-client` **没有**给 MCP server 发自定义请求头的配置项（`extra_headers` 只作用于控制面）。
-而 server 监听双栈意味着同网段可达。所以用 URL 路径当那把门：
+> ⚠️ **更正（2026-09-18）**：本节原先写着「`tunnel-client` 没有给 MCP server 发
+> 自定义请求头的配置项」—— **这条是错的**。`mcp.extra-headers`
+> （env `MCP_EXTRA_HEADERS`）就是发给所配置的 MCP server 的，官方还明确它
+> **不经过 OpenAI 控制面**（见 `docs/configuration.md` 的 "Static MCP headers"
+> 与 `docs/architecture.md` 的 auth / data flow 矩阵）。当初只看到
+> `control_plane.extra_headers` 就下了结论，把两件事混成了一件。
+
+路径 token 仍然是本目录的默认做法，理由与请求头无关：它另外挡住了
+「同网段直接扫 18090 端口」这条路，而静态头只在经隧道转发时才生效。
+想改用请求头的话：给本 server 设 `MCP_BEARER=<值>`，再在 `docker/.env` 里设
+`MCP_EXTRA_HEADERS=Authorization: Bearer <同一个值>` —— 两者是一对。
+
+代码里的路径门长这样：
 
 ```
 http://host.docker.internal:18090/t/<MCP_PATH_TOKEN>/mcp

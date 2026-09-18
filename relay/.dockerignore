@@ -1,0 +1,13 @@
+# 关键：这两个绝不能被 COPY 进镜像。
+#   .env            —— 含 RELAY_ADMIN_TOKEN 等
+#   .session-secret —— 会话签名密钥，拿到就能伪造任意用户的 cookie
+# 镜像会被推到 registry，一旦进去就是永久泄露，删层也删不干净。
+.env
+.session-secret
+
+# 临时产物与本机调试脚本输出
+_scratch
+*.txt
+
+# 万一以后引入依赖，别把宿主平台的 node_modules 拷进去
+node_modules

@@ -26,6 +26,11 @@ cp .env.example .env
 #    编辑 .env，填 CONTROL_PLANE_TUNNEL_ID
 printf '%s\n' 'sk-你的RuntimeAPIKey' > secrets/control-plane.key
 chmod 600 secrets/control-plane.key
+#    模式 C（自建中继）还要一枚中继令牌 —— 这两条命令一起把文件建好并填进 .env：
+node ../relay/tools/mint-tunnel-token.js
+#    然后 .env 里设 MCP_EXTRA_HEADERS=Authorization: file:/run/secrets/relay_mcp_token
+#    （模式 A/B 不用，MCP_EXTRA_HEADERS 留空即可；但 secrets/relay-mcp-token.txt
+#      这个文件仍会被挂载，建个空文件即可）
 
 # 2) 起
 docker compose up -d --build
@@ -38,6 +43,53 @@ docker compose logs -f tunnel
 
 `secrets/control-plane.key` 里必须放 **Runtime API key**，不是 admin key ——
 admin key 喂给 daemon 会鉴权失败。
+
+### 服务器形态：relay + tunnel 作为一个单元
+
+前面那个 `up -d` 起的是**本机开发形态**（中继跑在宿主上）。要真正部署到服务器，
+加上 `--profile server` —— 这时中继作为主服务、隧道作为它的边车一起起来：
+
+```bash
+# 1) 建三个 server 专用 secret（内容单行，结尾换行会被 trim）
+cd docker
+printf '%s\n' "$(openssl rand -hex 32)"     > secrets/relay-admin-token.txt
+printf '%s\n' '<Supabase 的 ANON_KEY>'      > secrets/supabase-anon-key.txt
+printf '%s\n' '<Supabase 的 SERVICE_ROLE_KEY>' > secrets/supabase-service-role-key.txt
+chmod 600 secrets/*
+
+# 2) .env 里切到服务器形态（三个变量，见 .env.example 末尾一节）
+#    MCP_SERVER_URL=http://relay:18086/mcp      ← 用 compose 服务名，不走宿主
+#    RELAY_PUBLIC_URL=https://mcp.example.com   ← device 授权链接靠它拼绝对地址
+#    PUBLIC_SUPABASE_URL=https://<ref>.supabase.co
+
+# 3) 起
+docker compose --profile server up -d --build
+
+# 4) 验
+docker compose ps                                # 两个服务都应 Up (healthy)
+curl -fsS http://127.0.0.1:18080/readyz          # 隧道就绪
+docker compose exec relay node -e "fetch('http://127.0.0.1:18086/healthz').then(r=>r.text()).then(console.log)"
+```
+
+两个形态共用同一个 compose 文件，差别只有 `MCP_SERVER_URL` 一个变量。中继服务被
+profile 挡住，所以开发形态下不会多起一个中继去抢宿主上的 18086。
+
+三点要知道为什么这样设计：
+
+- **compose 里的 relay 段用 `${VAR-default}` 而不用 `${VAR:?}`。** compose 的 `:?`
+  插值对**所有**服务生效、**不认 profile** —— 用它会让本机开发形态也一起起不来。
+  "必须有值"交给中继自己判（缺 ANON_KEY / SERVICE_ROLE_KEY 时拒绝启动并列出缺哪项）。
+- **relay 的 18086 默认不发布到宿主。** 前面有 TLS 反代时应该让它走 compose 网络，
+  端口不出现在宿主上。要自己直连就把 `ports` 那段取消注释 —— **只绑 127.0.0.1**，
+  绑 0.0.0.0 会让 `/console` 与 `/api/mcp-info` 对局域网敞开。
+- **`RELAY_COOKIE_SECURE` / `RELAY_ALLOW_SIGNUP` 在服务器形态下默认是紧的**
+  （true / false）。注意 `RELAY_ALLOW_SIGNUP` 在源码里的默认值是
+  `true`（开放注册），所以服务器上必须由 compose 显式压成 false。
+  （`RELAY_REQUIRE_AUTH` 这个开关已经不存在了 —— `/mcp` 一律要求有效令牌，
+  改用 OAuth 2.1 签发，见 `../relay/README.md`。）
+
+中继的容器细节（零依赖镜像、`<KEY>_FILE` 白名单、会话密钥为什么必须持久化）
+见 `../relay/README.md` 的「部署形态」。
 
 ### 别把「权限」和「key」搞混（三个页面）
 
@@ -276,14 +328,57 @@ doctor 不告诉你用了哪个。容器里不用 profile，同样不受影响�
 
 1. Connection 选 **Tunnel**（另一个选项是 Server URL）
 2. Available tunnels 下拉里选你的 tunnel，或直接粘贴 `tunnel_id`
-3. **Authentication** —— 默认是 `OAuth`，但我们的 server 是 stdio 且无任何鉴权
-   （日志里 `oauth_discovery_urls=[]`），这里要改成无需认证类选项。**这条我未实测。**
+3. **Authentication** —— 三档：`OAuth` / `无身份验证` / `混合`（Mixed）。
+   **没有 API key 这一档** —— 别去找它。选哪档取决于你的 MCP server：
+
+   | 你的 MCP server | 选什么 | 为什么 |
+   | --- | --- | --- |
+   | 无鉴权（模式 A/B 的自写 server） | 无身份验证 | 没人需要出示身份 |
+   | 自建中继（模式 C），令牌走静态头 | **无身份验证** | 见下条 —— 静态头由隧道注入 |
+   | 自己实现了 OAuth 授权服务器 | OAuth | ChatGPT 会自己去读 protected-resource metadata |
+
+   `混合` 的含义是：`initialize` / `tools/list` 免鉴权，单个工具调用按
+   per-tool security scheme 要求认证。我们两种形态都用不上它。
+
+   选 `OAuth` 时 ChatGPT 会去读 `/.well-known/oauth-protected-resource`；
+   中继虽然提供这个路径但**不含 `authorization_servers`**（当初是为了消掉隧道的
+   一条 discovery 告警），所以 OAuth 档在这里走不通 —— 我们的令牌是自签的
+   `rmcp_…`，不是 OAuth access token。
+
+   ⚠️ **为什么模式 C 必须选「无身份验证」**：connector 转发来的 `Authorization`
+   头会**覆盖**隧道注入的静态头（官方：connector-forwarded headers apply last）。
+   留在 `OAuth` / `混合` 档就可能把中继的令牌顶掉，导致 401。
 
 **建 connector 期间 daemon 必须活着**，之后每次工具调用也都要求它运行 ——
 connector 的发现与调用都走隧道。本 compose 是 `restart: unless-stopped`，正常不会掉。
 
 若 picker 里看不到 tunnel，官方给三条排查：tunnel 创建时的 workspace scope 不对、
 connector 操作者缺 Tunnels **Use**、或 daemon 没 ready。前两条都不满足就直接粘 `tunnel_id`。
+
+### 给 MCP server 加静态凭据（`MCP_EXTRA_HEADERS`）
+
+这是官方支持的两条路之一（另一条是给不可达 OpenAI 的要求直接别用隧道）。
+
+```bash
+# 1) 生成令牌 + 写文件（模式 C 用；会一并写进 docker/secrets/）
+node ../relay/tools/mint-tunnel-token.js
+
+# 2) .env 里引用它（值必须整值写成 file:/…，不能写 "Bearer file:/…"）
+MCP_EXTRA_HEADERS=Authorization: file:/run/secrets/relay_mcp_token
+
+# 3) 重建容器
+docker compose up -d
+```
+
+几个容易踩的点：
+
+- **文件内容是完整头值** `Bearer rmcp_<prefix>_<secret>`，前缀要写在文件里 ——
+  `file:` 是**整值匹配**，`Authorization: Bearer file:/path` 会被当字面量。
+  末尾可以有且仅有一个换行，tunnel-client 会裁掉一个行尾。
+- **值里不能有 `,` 或 `;`** —— 环境变量形式按这两个字符切成多个头。
+- 作用域只有「tunnel-client → 配置的 MCP server 源」这一跳，官方明确
+  **不发往 OpenAI 控制面**；但它是**静态配置**，不是按请求签发的短期令牌。
+- 留空 `MCP_EXTRA_HEADERS=` 就完全不注入（模式 A/B 的形态）。
 
 ## 当前状态与下一步
 

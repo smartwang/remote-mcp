@@ -24,8 +24,10 @@
  *                                           而 Docker 的 host-gateway 会解析到 IPv6，所以默认双栈最稳。
  *   MCP_PORT          监听端口              默认 18090
  *   MCP_PATH_TOKEN    路径内共享密钥。设了就只接受 /t/<token>/mcp
- *                     —— 因为 tunnel-client 没法给 MCP server 发自定义请求头，
- *                        而绑 0.0.0.0 意味着同网段可达，这个 token 就是那道门。
+ *                     —— 因为绑 0.0.0.0 意味着同网段可达，这个 token 就是那道门。
+ *                     （另一种做法是 MCP_BEARER 走请求头：隧道侧用
+ *                      MCP_EXTRA_HEADERS 注入同一个值。见 ../windows/README.md，
+ *                      那里更正了「tunnel-client 发不了自定义头」这条旧结论。）
  *   MCP_BEARER        可选。设了就要求 Authorization: Bearer <值>
  *   MCP_ALLOWED_ROOTS 可选。分号分隔的目录白名单，限制文件工具可达范围。不设=不限制。
  *   MCP_MAX_CHARS     单次返回字符上限，默认 20000

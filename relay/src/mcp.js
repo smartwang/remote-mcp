@@ -111,23 +111,68 @@ function isBroadcastCapable(row) {
   return caps.transport_broadcast_v1 === true || caps.transport_broadcast_v1 === 'true';
 }
 
+function agoText(iso) {
+  if (!iso) return '从未';
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return String(iso);
+  const s = Math.max(0, (Date.now() - ts) / 1000);
+  if (s < 90) return `${Math.round(s)} 秒前`;
+  if (s < 5400) return `${Math.round(s / 60)} 分钟前`;
+  if (s < 172800) return `${(s / 3600).toFixed(1)} 小时前`;
+  return `${Math.round(s / 86400)} 天前`;
+}
+
+const DEVICE_COLUMNS = 'id,user_id,device_name,status,last_seen,capabilities';
+
+/** 取本租户的全部设备（按最后心跳倒序）。 */
+async function listDevices(scope) {
+  const rows = await scope.select('mcp_devices', {
+    select: DEVICE_COLUMNS,
+    order: 'last_seen.desc',
+  });
+  return Array.isArray(rows) ? rows : [];
+}
+
+/** 本租户当前可被派发的设备（在线 + 具备广播能力优先）。 */
+function routableDevices(all) {
+  const fresh = all.filter(isFresh);
+  const capable = fresh.filter(isBroadcastCapable);
+  return capable.length ? capable : fresh;
+}
+
 /**
- * 选出这次调用该路由到哪台设备。
+ * 选出这次调用该路由到哪台设备 —— **只在本租户内挑**。
  *
- * 单租户阶段：优先"最近心跳 + 声明了广播能力"的那台。
- * 多租户要把 user_id 从调用方的身份里取，不能像现在这样全局挑。
+ * scope 是必经参数而不是可选参数：这是隔离的物理保证。之前这里没有 user_id
+ * 概念，全局挑"最近心跳的那台"，多租户下等于"A 的调用可能落到 B 的机器上"。
+ *
+ * 路由语义（RELAY_ROUTE_POLICY=auto-single，默认）：
+ *   0 台      → 报错，提示怎么接入设备
+ *   1 台      → 自动选（多数人的日常，零感知）
+ *   多台      → **报错并列出候选**，要求显式指定 device_id
+ *
+ * 为什么多台时宁可报错也不自动挑：自动挑是"静默地选了一台你没在想的机器"。
+ * 一次 write_file 落到错误的机器上，代价远高于多一轮交互。候选列表直接放进
+ * 错误信息里，AI 会把它转述给用户，用户回一句"用 xxx"即可继续。
  */
-async function resolveTargetDevice(explicitDeviceId) {
+async function resolveTargetDevice(scope, explicitDeviceId) {
   if (explicitDeviceId) {
-    const rows = await supa.rest.select('mcp_devices', {
-      id: `eq.${explicitDeviceId}`,
-      select: 'id,user_id,device_name,status,last_seen,capabilities',
-    });
-    const row = Array.isArray(rows) ? rows[0] : rows;
-    if (!row) throw mcpError(`找不到设备 ${explicitDeviceId}`, -32602);
+    // find() 已经带上 user_id 条件：别人的设备在这里等同"不存在"，
+    // 调用方无法通过错误信息的差别来探测某个 UUID 是否属于别人。
+    const row = await scope.find('mcp_devices', explicitDeviceId, DEVICE_COLUMNS);
+    if (!row) {
+      // 失败路径上多查一次（service_role，不带租户条件）只为判定这是否是一次
+      // 跨租户越权尝试 —— 值得记审计，因为它是"有人在试探"的最早信号。
+      await noteCrossTenantProbe(scope.userId, explicitDeviceId);
+      throw mcpError(
+        `找不到设备 ${explicitDeviceId}（它不属于当前账号，或已被删除）。`,
+        -32602
+      );
+    }
     if (!isFresh(row)) {
       throw mcpError(
-        `设备 ${row.device_name}（${row.id}）最后一次心跳是 ${row.last_seen}，已超出 ${Math.round(cfg.DEVICE_FRESH_MS / 60000)} 分钟窗口，判定为离线。` +
+        `设备 ${row.device_name}（${row.id}）最后一次心跳是 ${row.last_seen}，已超出 ` +
+        `${Math.round(cfg.DEVICE_FRESH_MS / 60000)} 分钟窗口，判定为离线。` +
         `请确认该设备上的 \`desktop-commander remote\` 正在运行。`,
         -32000
       );
@@ -135,35 +180,70 @@ async function resolveTargetDevice(explicitDeviceId) {
     return row;
   }
 
-  const rows = await supa.rest.select('mcp_devices', {
-    select: 'id,user_id,device_name,status,last_seen,capabilities',
-    order: 'last_seen.desc',
-  });
-  const all = Array.isArray(rows) ? rows : [];
+  const all = await listDevices(scope);
   if (all.length === 0) {
     throw mcpError(
-      '还没有任何已授权的设备。先在本机执行一次 device flow：' +
-      `设置 MCP_SERVER_URL=${cfg.RELAY_PUBLIC_URL} 后运行 \`npx @wonderwhy-er/desktop-commander@latest remote\`。`,
+      '当前账号下还没有已授权的设备。在目标机器上执行一次 device flow：' +
+      `设置 MCP_SERVER_URL=${cfg.RELAY_PUBLIC_URL} 后运行 ` +
+      '`npx @wonderwhy-er/desktop-commander@latest remote`，然后在浏览器里批准。',
       -32000
     );
   }
 
-  const fresh = all.filter(isFresh);
-  if (fresh.length === 0) {
+  const pool = routableDevices(all);
+  if (pool.length === 0) {
     const newest = all[0];
     throw mcpError(
-      `有 ${all.length} 台已授权设备，但全部离线。最近一台是 ${newest.device_name}（最后心跳 ${newest.last_seen}）。` +
+      `本账号下有 ${all.length} 台已授权设备，但全部离线。最近一台是 ` +
+      `${newest.device_name}（最后心跳 ${agoText(newest.last_seen)}）。` +
       '请确认设备上的 `desktop-commander remote` 正在运行。',
       -32000
     );
   }
 
-  const capable = fresh.filter(isBroadcastCapable);
-  const pool = capable.length ? capable : fresh;
-  if (!capable.length) {
-    console.warn('[mcp] 没有设备声明 transport_broadcast_v1，仍尝试广播派发');
+  if (pool.length > 1 && cfg.ROUTE_POLICY === 'auto-single') {
+    const lines = pool
+      .map((d) => `  · ${d.device_name} —— device_id: ${d.id}（最后心跳 ${agoText(d.last_seen)}）`)
+      .join('\n');
+    throw mcpError(
+      `本账号下有 ${pool.length} 台设备在线，无法自动判断要操作哪一台。\n` +
+      '请先向用户确认目标机器，然后在工具参数里附加 "device_id" 再调用一次，例如：\n' +
+      '  { "path": "C:\\\\...", "device_id": "<下面某个 id>" }\n' +
+      '当前可选的在线设备：\n' +
+      lines,
+      -32602
+    );
+  }
+
+  if (!isBroadcastCapable(pool[0])) {
+    console.warn('[mcp] 目标设备没有声明 transport_broadcast_v1，仍尝试广播派发');
   }
   return pool[0];
+}
+
+/** 判定一次失败的设备查找是否其实是跨租户越权，是则记审计。 */
+async function noteCrossTenantProbe(actorUserId, attemptedDeviceId) {
+  try {
+    const rows = await supa.rest.select('mcp_devices', {
+      id: `eq.${attemptedDeviceId}`,
+      select: 'id,user_id,device_name',
+    });
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    if (!row) return; // 真的不存在，不是越权
+    await supa.audit({
+      userId: actorUserId,
+      actor: 'tenant',
+      action: 'security.cross_tenant_device',
+      target: attemptedDeviceId,
+      detail: { owner_user_id: row.user_id, device_name: row.device_name },
+    });
+    console.warn(
+      `[security] 跨租户访问设备被拒：actor=${actorUserId} 试图操作 ${attemptedDeviceId}` +
+        `（属于 ${row.user_id}）`
+    );
+  } catch {
+    // 审计尽力而为，绝不因为它失败而改变业务结果
+  }
 }
 
 function mcpError(message, code = -32603) {
@@ -176,14 +256,11 @@ function mcpError(message, code = -32603) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function waitForResult(callId, deadline) {
+async function waitForResult(scope, callId, deadline) {
   let lastStatus = null;
   while (Date.now() < deadline) {
-    const rows = await supa.rest.select('mcp_remote_calls', {
-      id: `eq.${callId}`,
-      select: 'status,result,error_message',
-    });
-    const row = Array.isArray(rows) ? rows[0] : rows;
+    // 按 id + user_id 查：即使 callId 是拼出来的，也取不到别的租户的行。
+    const row = await scope.find('mcp_remote_calls', callId, 'status,result,error_message');
     if (!row) return { status: 'missing' };
     if (row.status !== lastStatus) {
       lastStatus = row.status;
@@ -195,18 +272,25 @@ async function waitForResult(callId, deadline) {
   return { status: 'client_timeout' };
 }
 
-async function callTool(name, args, meta = {}) {
+/**
+ * 派发一次工具调用。
+ *
+ * 所有数据访问都经 scope（tenantScope），所以：
+ *   · 插入的调用行 user_id 必然是本租户的
+ *   · 轮询结果时也带 user_id 条件
+ *   · 门铃广播到 user:<本租户 id> 频道，别的租户的 device 订阅的是自己的频道
+ */
+async function callTool(scope, name, args, meta = {}) {
   const started = Date.now();
   const explicitDeviceId = args?.__device_id || args?.device_id || meta?.device_id;
   const cleanArgs = { ...(args || {}) };
   delete cleanArgs.__device_id;      // 这两个只是路由提示，不能当作工具参数送到设备
   delete cleanArgs.device_id;
 
-  const device = await resolveTargetDevice(explicitDeviceId);
+  const device = await resolveTargetDevice(scope, explicitDeviceId);
 
-  const inserted = await supa.rest.insert('mcp_remote_calls', {
+  const inserted = await scope.insert('mcp_remote_calls', {
     device_id: device.id,
-    user_id: device.user_id,
     tool_name: name,
     tool_args: cleanArgs,
     metadata: {
@@ -218,18 +302,21 @@ async function callTool(name, args, meta = {}) {
   const callRow = Array.isArray(inserted) ? inserted[0] : inserted;
   if (!callRow?.id) throw mcpError('写入调用行失败：没有拿到 id', -32603);
 
-  console.log(`[mcp] call ${callRow.id.slice(0, 8)} ${name} → device ${device.device_name}(${device.id.slice(0, 8)}) args=${JSON.stringify(cleanArgs).slice(0, 120)}`);
+  console.log(
+    `[mcp] call ${callRow.id.slice(0, 8)} ${name} → device ${device.device_name}(${device.id.slice(0, 8)})` +
+      ` tenant ${scope.userId.slice(0, 8)} args=${JSON.stringify(cleanArgs).slice(0, 120)}`
+  );
 
   // 门铃。payload 只带 id —— device 会按主键回查整行（remote-channel.ts onDoorbell）。
   try {
-    await supa.broadcast(`user:${device.user_id}`, 'new_call', {
+    await supa.broadcast(`user:${scope.userId}`, 'new_call', {
       call_id: callRow.id,
       device_id: device.id,
     });
   } catch (err) {
     // 广播失败 = 设备永远不会知道有这次调用。等 5 分钟毫无意义，快速失败并
     // 把行结算掉，避免留下一个"executing 中"的幽灵。
-    await supa.rest
+    await scope
       .update('mcp_remote_calls', { id: `eq.${callRow.id}` }, {
         status: 'failed',
         error_message: `门铃广播失败：${err.message}`,
@@ -243,7 +330,7 @@ async function callTool(name, args, meta = {}) {
     );
   }
 
-  const row = await waitForResult(callRow.id, Date.now() + cfg.CALL_TIMEOUT_MS);
+  const row = await waitForResult(scope, callRow.id, Date.now() + cfg.CALL_TIMEOUT_MS);
   const elapsedMs = Date.now() - started;
 
   if (row.status === 'completed') {
@@ -293,6 +380,51 @@ function normalizeResult(result, elapsedMs) {
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05', '2024-10-07'];
 const LATEST = PROTOCOL_VERSIONS[0];
 
+/** 会话必须带租户身份；没有就一律拒绝，不存在"默认租户"这种回落。 */
+function scopeFor(session) {
+  if (!session?.userId) {
+    throw mcpError('这个会话没有绑定租户身份，拒绝执行。请用带 Authorization: Bearer <令牌> 的请求重新 initialize。', -32001);
+  }
+  return supa.tenantScope(session.userId);
+}
+
+/**
+ * 把本租户的设备清单写进 initialize 的 instructions。
+ *
+ * 为什么放在这里而不是加一个"列设备"的工具：工具表是 DesktopCommander 的
+ * 26 个工具原样透传的，塞一个自造工具进去会让"工具名与 DesktopCommander 完全
+ * 一致"这条约定失效。而 instructions 是每个新会话必然读到的地方 ——
+ * 模型只有先知道有哪些设备、以及 device_id 是什么，才可能在多设备时正确指定目标。
+ */
+function deviceSection(devices) {
+  if (!devices.length) {
+    return '\n\n【设备】当前账号下还没有已授权的设备，任何工具调用都会失败。' +
+      '需要先在目标机器上运行 desktop-commander remote 并完成浏览器授权。';
+  }
+  const online = devices.filter(isFresh);
+  const lines = devices
+    .map((d) => {
+      const state = isFresh(d) ? '在线' : `离线（最后心跳 ${agoText(d.last_seen)}）`;
+      const bcast = isBroadcastCapable(d) ? '' : '，⚠ 缺少广播通道，调用会失败';
+      return `  · ${d.device_name} —— device_id: ${d.id} —— ${state}${bcast}`;
+    })
+    .join('\n');
+
+  let hint;
+  if (online.length === 1) {
+    hint = `\n工具调用会自动路由到唯一在线的那台设备（${online[0].device_name}），无需指定 device_id。`;
+  } else if (online.length > 1) {
+    hint =
+      '\n当前有 **' + online.length + ' 台**设备在线，中继无法自动判断目标。' +
+      '调用工具时必须在参数里附加 "device_id"（取上面某个 id），例如 ' +
+      '{"path":"C:\\\\...","device_id":"<id>"}。若不指定，调用会失败并返回候选列表。' +
+      '\ndevice_id 只用于路由，不会被转发给工具本身。';
+  } else {
+    hint = '\n当前没有任何设备在线，工具调用会失败。';
+  }
+  return `\n\n【本账号的设备】\n${lines}${hint}`;
+}
+
 async function handle(msg, session) {
   const { method, params } = msg;
 
@@ -301,6 +433,19 @@ async function handle(msg, session) {
       const requested = params?.protocolVersion;
       const protocolVersion = PROTOCOL_VERSIONS.includes(requested) ? requested : LATEST;
       const cat = getCatalog();
+
+      let devSection = '';
+      if (session?.userId) {
+        try {
+          devSection = deviceSection(await listDevices(supa.tenantScope(session.userId)));
+        } catch (err) {
+          // 列设备失败不该让 initialize 失败 —— 否则一个数据库抖动会让客户端
+          // 连工具表都拿不到。降级成一句提示，真正的错误会在 tools/call 时暴露。
+          console.warn(`[mcp] initialize 时列设备失败（降级继续）：${err.message}`);
+          devSection = '\n\n【设备】暂时无法读取设备清单（数据库查询失败），工具调用时可能报错。';
+        }
+      }
+
       return {
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
@@ -310,9 +455,11 @@ async function handle(msg, session) {
           title: 'Remote MCP Relay',
         },
         instructions:
-          `本服务把工具调用转发到用户已授权的设备上执行（当前目录基于 DesktopCommander ${cat.source.version}，` +
-          `${cat.toolCount} 个工具）。工具名与 DesktopCommander 完全一致。文件路径是**设备本地**的路径，` +
-          '不是你所在环境的路径。',
+          `本服务把工具调用转发到**用户自己已授权的设备**上执行（当前目录基于 ` +
+          `DesktopCommander ${cat.source.version}，${cat.toolCount} 个工具）。工具名与 ` +
+          'DesktopCommander 完全一致。\n' +
+          '重要：工具里的文件路径是**目标设备本地**的路径，不是你所在环境的路径。' +
+          devSection,
       };
     }
 
@@ -331,7 +478,7 @@ async function handle(msg, session) {
       if (!name) throw mcpError('tools/call 缺少 name', -32602);
       const known = getCatalog().tools.some((t) => t.name === name);
       if (!known) throw mcpError(`未知工具：${name}`, -32602);
-      return callTool(name, params?.arguments || {}, {
+      return callTool(scopeFor(session), name, params?.arguments || {}, {
         ...(params?._meta || {}),
         client: session?.clientInfo || null,
       });
@@ -359,4 +506,16 @@ async function handle(msg, session) {
   }
 }
 
-module.exports = { handle, getCatalog, getToolList, loadCatalog, resolveTargetDevice, callTool };
+module.exports = {
+  handle,
+  getCatalog,
+  getToolList,
+  loadCatalog,
+  listDevices,
+  routableDevices,
+  resolveTargetDevice,
+  callTool,
+  isFresh,
+  isBroadcastCapable,
+  scopeFor,
+};

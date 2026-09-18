@@ -19,6 +19,7 @@
 const crypto = require('node:crypto');
 const cfg = require('./config');
 const supa = require('./supa');
+const layout = require('./layout');
 
 /** device_code → record */
 const pending = new Map();
@@ -82,10 +83,20 @@ function start(body) {
   console.log(`[device] start  user_code=${userCode} device="${rec.device_name}" device_id=${rec.requested_device_id || '(none)'}`);
 
   if (cfg.AUTO_APPROVE) {
-    // 本地联调：不阻塞请求，后台异步批准（approve 里会打 GoTrue）
-    approve(userCode).catch((err) => {
-      console.error(`[device] AUTO_APPROVE 失败：${err.message}`);
-    });
+    // 本地联调：不阻塞请求，后台异步批准。
+    // 多租户下"自动批准"必须指定一个归属账号，这里用遗留的 OWNER_EMAIL ——
+    // 自动批准意味着任何设备请求都会被无条件接入，只该在本地开。
+    (async () => {
+      try {
+        const user =
+          (await supa.auth.findByEmail(cfg.OWNER_EMAIL)) ||
+          (await supa.auth.ensureUser(cfg.OWNER_EMAIL, cfg.OWNER_PASSWORD));
+        if (!user?.id) throw new Error('找不到用于自动批准的账号');
+        await approve(userCode, { userId: user.id, email: user.email });
+      } catch (err) {
+        console.error(`[device] AUTO_APPROVE 失败：${err.message}`);
+      }
+    })();
   }
 
   return {
@@ -102,34 +113,44 @@ function start(body) {
 
 const approveLocks = new Map(); // user_code → Promise，防并发重复建设备
 
-async function approve(userCodeInput, { deviceNameOverride } = {}) {
+/**
+ * 批准一个待处理的授权请求，把设备绑定到**批准者**的账号上。
+ *
+ * 多租户下的关键变化：userId 是必传的，且不再有"默认账号"这种回落。
+ * 之前这里写死 cfg.OWNER_EMAIL —— 意味着**任何人**只要打到 /device/approve
+ * 就能把一台设备接进系统（而且都归到同一个账号）。现在批准者是谁，设备就属于谁，
+ * 所以调用点（路由层）必须先完成登录校验。
+ *
+ * 另一点：不再需要用户密码。device 需要的是一个真实 session（它靠这个过
+ * PostgREST 与 Realtime 的 RLS），而这个 session 用 admin 的 generate_link +
+ * verify 免密就能签出来 —— 见 supa.auth.mintSession 的注释。
+ */
+async function approve(userCodeInput, { userId, email, deviceNameOverride, ip = null } = {}) {
   const userCode = normalizeUserCode(userCodeInput);
   const rec = [...pending.values()].find((r) => normalizeUserCode(r.user_code) === userCode);
   if (!rec) throw Object.assign(new Error(`找不到待批准的验证码 ${userCodeInput}`), { status: 404 });
   if (rec.status === 'approved') return rec;
   if (rec.expires_at < Date.now()) throw Object.assign(new Error('验证码已过期'), { status: 410 });
 
+  if (!userId) {
+    throw Object.assign(new Error('批准请求缺少登录身份'), { status: 401 });
+  }
+
   const key = userCode;
   if (approveLocks.has(key)) return approveLocks.get(key);
-  const job = (async () => {
-    // 1) 账号
-    const user = await supa.auth.ensureUser(cfg.OWNER_EMAIL, cfg.OWNER_PASSWORD);
-    if (!user?.id) throw new Error('GoTrue 没有返回用户 id');
 
-    // 2) 设备行。优先复用 device 带上来的 id（真正的"重连"场景），
-    //    否则新建一台。
+  const job = (async () => {
+    const scope = supa.tenantScope(userId);
+
+    // 1) 设备行。device 会把本地持久化的 device_id 带上来，但那个 id 只有在
+    //    **属于本租户**时才能复用 —— tenantScope.find 自带 user_id 条件，
+    //    别人的 id 在这里等同不存在，于是走新建分支。
     let device = null;
     if (rec.requested_device_id) {
-      const found = await supa.rest.select('mcp_devices', {
-        id: `eq.${rec.requested_device_id}`,
-        user_id: `eq.${user.id}`,
-        select: 'id,device_name',
-      });
-      if (Array.isArray(found) && found.length) device = found[0];
+      device = await scope.find('mcp_devices', rec.requested_device_id, 'id,device_name');
     }
     if (!device) {
-      const inserted = await supa.rest.insert('mcp_devices', {
-        user_id: user.id,
+      const inserted = await scope.insert('mcp_devices', {
         device_name: deviceNameOverride || rec.device_name || 'unknown-device',
         status: 'offline',
       });
@@ -137,19 +158,10 @@ async function approve(userCodeInput, { deviceNameOverride } = {}) {
     }
     if (!device?.id) throw new Error('创建设备行失败');
 
-    // 3) 真的去 GoTrue 换 session。先确保密码是我们知道的那个 ——
-    //    账号可能是上一次以别的密码建的。
-    let session;
-    try {
-      session = await supa.auth.signInWithPassword(cfg.OWNER_EMAIL, cfg.OWNER_PASSWORD);
-    } catch (err) {
-      if (err.status === 400 || err.status === 401) {
-        await supa.auth.setPassword(user.id, cfg.OWNER_PASSWORD);
-        session = await supa.auth.signInWithPassword(cfg.OWNER_EMAIL, cfg.OWNER_PASSWORD);
-      } else {
-        throw err;
-      }
-    }
+    // 2) 免密签发一个真实 session 交给 device 进程。
+    const targetEmail = email || (await supa.auth.getById(userId))?.email;
+    if (!targetEmail) throw new Error('无法确定批准者邮箱，session 签发中止');
+    const session = await supa.auth.mintSession(targetEmail);
 
     rec.status = 'approved';
     rec.session = {
@@ -159,8 +171,22 @@ async function approve(userCodeInput, { deviceNameOverride } = {}) {
       expires_in: session.expires_in || 3600,
     };
     rec.assigned_device_id = device.id;
-    rec.user_id = user.id;
-    console.log(`[device] approved user_code=${rec.user_code} device_id=${device.id} user=${user.id}`);
+    rec.user_id = userId;
+    rec.approved_at = Date.now();
+
+    await supa.audit({
+      userId,
+      actor: 'tenant',
+      action: 'device.approve',
+      target: device.id,
+      detail: { device_name: device.device_name, user_code: rec.user_code },
+      ip,
+    });
+
+    console.log(
+      `[device] approved user_code=${rec.user_code} device=${device.id.slice(0, 8)} ` +
+        `"${device.device_name}" → tenant ${userId.slice(0, 8)}`
+    );
     return rec;
   })().finally(() => approveLocks.delete(key));
 
@@ -168,15 +194,26 @@ async function approve(userCodeInput, { deviceNameOverride } = {}) {
   return job;
 }
 
-/* ------------------------------------------------------------------- /device/poll */
-
-function deny(userCodeInput) {
+/** 拒绝一个待处理请求。同样要求登录身份（路由层保证）。 */
+function deny(userCodeInput, { userId = null, ip = null } = {}) {
   const userCode = normalizeUserCode(userCodeInput);
   const rec = [...pending.values()].find((r) => normalizeUserCode(r.user_code) === userCode);
   if (!rec) throw Object.assign(new Error('找不到该验证码'), { status: 404 });
   rec.status = 'denied';
+  supa
+    .audit({
+      userId,
+      actor: 'tenant',
+      action: 'device.deny',
+      target: rec.device_name,
+      detail: { user_code: rec.user_code },
+      ip,
+    })
+    .catch(() => {});
   return rec;
 }
+
+/* ------------------------------------------------------------------- /device/poll */
 
 function poll(body) {
   sweepExpired();
@@ -251,40 +288,13 @@ function listPending() {
 }
 
 /**
- * 页面骨架。opts.title 换标题，opts.extraCss 追加页面专属样式 ——
- * 让运维状态页与授权页共用同一套基础 CSS，避免两份样式各自漂移。
+ * 页面骨架 —— 转发到共享布局（layout.js）。
+ *
+ * 保留这个转发是为了不打断既有调用点（index.js 的 renderPage/renderStatusPage）。
+ * 真正的样式与转义在 layout.js，所有页面共用一套，避免各页 CSS 各自漂移。
  */
 function page(htmlBody, opts = {}) {
-  const title = opts.title || '授权设备接入远程 MCP';
-  const extraCss = opts.extraCss || '';
-  const wide = opts.wide ? 'body{max-width:820px}' : '';
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title}</title>
-<style>
-:root{color-scheme:light}
-body{font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif;max-width:640px;margin:40px auto;padding:0 20px;color:#2C2C2A}
-h1{font-size:18px;font-weight:500;margin:0 0 4px}
-h2{font-size:14px;font-weight:500;margin:26px 0 2px;color:#2C2C2A}
-p{color:#5F5E5A;margin:6px 0}
-a{color:#185FA5}
-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#F1EFE8;padding:2px 6px;border-radius:4px}
-table{border-collapse:collapse;width:100%;margin:16px 0}
-th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #D3D1C7;font-size:13px}
-th{font-weight:500;color:#5F5E5A}
-tbody th{width:150px}
-input[type=text]{font:inherit;padding:8px 10px;border:1px solid #B4B2A9;border-radius:8px;width:180px;letter-spacing:2px;text-transform:uppercase}
-button{font:inherit;padding:8px 16px;border:1px solid #185FA5;background:#E6F1FB;color:#0C447C;border-radius:8px;cursor:pointer}
-button.deny{border-color:#BA7517;background:#FAEEDA;color:#633806;margin-left:8px}
-.ok{border:1px solid #185FA5;background:#E6F1FB;color:#0C447C;padding:10px 12px;border-radius:8px;margin:16px 0}
-.err{border:1px solid #A32D2D;background:#FCEBEB;color:#791F1F;padding:10px 12px;border-radius:8px;margin:16px 0}
-.dim{color:#888780}
-.tag{display:inline-block;padding:1px 7px;border-radius:999px;font-size:12px}
-.tag.on{background:#E6F1FB;color:#0C447C}
-.tag.off{background:#F1EFE8;color:#5F5E5A}
-${wide}
-${extraCss}
-</style></head><body>${htmlBody}</body></html>`;
+  return layout.page(htmlBody, opts);
 }
 
 module.exports = {
