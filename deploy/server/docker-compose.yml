@@ -1,0 +1,117 @@
+# 生产形态：只跑 relay，不要隧道。
+#
+# ┌─ VPS（公网） ──────────────────────────────────────────────┐
+# │   SafeLine / 任意反代 ──TLS──▶ 127.0.0.1:18086 (relay)     │
+# └────────────────────────────────────────────────────────────┘
+#              │ 出站 HTTPS（Supabase Cloud）+ 出站长轮询（门铃）
+#              ▼
+#        Supabase Cloud（PostgREST + GoTrue + Realtime）
+#              ▲
+#              │ 出站 WebSocket（设备订阅 user:<uid> 门铃）
+#   Windows 机器：device 进程（DesktopCommander remote 模式）
+#
+# 和 docker/docker-compose.yml 的区别：
+#   · 没有 tunnel 边车 —— 公网直连，不再需要 OpenAI 隧道；
+#   · relay 用**镜像**而不是 build，镜像来自 GHCR，服务器上不需要源码；
+#   · Supabase 是外部托管实例，所以没有 extra_hosts / 本地 supabase 服务。
+#
+# 另一个必须知道的事：镜像里 relay 以非 root 的 node 用户跑，
+# 会话签名密钥落在 named volume 里（见文件末尾 volumes 的说明）。
+
+name: remote-mcp
+
+services:
+  relay:
+    image: ${RELAY_IMAGE:-ghcr.io/smartwang/remote-mcp-relay:latest}
+    container_name: remote-mcp-relay
+    restart: unless-stopped
+
+    # env_file 提供可变配置（限速、缓存 TTL 等）；下面的 environment 优先级更高，
+    # 所以安全姿态不会被 .env 里的旧值悄悄覆盖。
+    env_file:
+      - .env
+
+    environment:
+      RELAY_HOST: 0.0.0.0
+      RELAY_PORT: "18086"
+
+      # —— 对外地址：这一条错了整个 OAuth 就废了 ——
+      # 授权页、AS 元数据里的 issuer、PRM 里的 resource、device flow 的验证链接，
+      # 全都由它拼绝对地址。必须是终端用户浏览器能直接打开的 HTTPS 地址。
+      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL:?RELAY_PUBLIC_URL 必填，例如 https://mcp.example.com}
+
+      # —— Supabase（托管实例）——
+      SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL 必填，例如 https://xxxx.supabase.co}
+      PUBLIC_SUPABASE_URL: ${PUBLIC_SUPABASE_URL:?PUBLIC_SUPABASE_URL 必填 —— 下发给 device，必须 device 也访问得到}
+
+      # —— 安全姿态：服务器形态一律是紧的 ——
+      # 注意这里没有 RELAY_REQUIRE_AUTH —— 那个开关 2026-09-18 已删除，
+      # /mcp 无条件要求令牌。
+      RELAY_COOKIE_SECURE: "true"
+      RELAY_ALLOW_SIGNUP: ${RELAY_ALLOW_SIGNUP:-false}
+      # 前面有 SafeLine 做 TLS 终结，所以信任 XFF 第一跳。
+      # 若改成直连公网（不经反代），必须置 false，否则限速可被伪造 IP 绕过。
+      RELAY_TRUST_PROXY: "true"
+      RELAY_ROUTE_POLICY: ${RELAY_ROUTE_POLICY:-auto-single}
+      RELAY_OWNER_EMAIL: ${RELAY_OWNER_EMAIL:-device@remote-mcp.local}
+
+      # —— 密钥走文件，不走环境变量 ——
+      # 环境变量会出现在 docker inspect 的明文里，任何能跑 docker 命令的人都能看到。
+      ANON_KEY_FILE: /run/secrets/supabase_anon_key
+      SERVICE_ROLE_KEY_FILE: /run/secrets/supabase_service_role_key
+      RELAY_ADMIN_TOKEN_FILE: /run/secrets/relay_admin_token
+      RELAY_SESSION_SECRET_FILE: /app/state/session-secret
+
+    secrets:
+      - supabase_anon_key
+      - supabase_service_role_key
+      - relay_admin_token
+
+    # 只绑回环。反代（SafeLine）与它同机，走 127.0.0.1 即可 ——
+    # 绑 0.0.0.0 会让 /console、/api/mcp-info 对全网敞开，
+    # 而 /api/mcp-info 会返回 Supabase 的公开地址，等于免费的资产测绘。
+    ports:
+      - "127.0.0.1:18086:18086"
+
+    volumes:
+      # 只放 session-secret 这一个文件。用卷而不是可写层，是为了重建容器后
+      # 已登录的浏览器会话不失效。
+      #
+      # ⚠️ 镜像里 /app/state 的属主是 node(1000)，首次创建卷时 docker 会把
+      # 这个属主一起复制过去，所以正常情况不用管。若日志出现 EACCES，
+      # 执行：docker compose run --rm --user root relay chown -R node:node /app/state
+      - relay_state:/app/state
+
+    # 内存不大（Node 进程几十 MB），但给个上限防止极端情况下拖垮宿主 ——
+    # 这台机器还要跑 WAF。
+    mem_limit: 256m
+
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:18086/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  relay_state:
+
+secrets:
+  # 每个文件都是**单行**，结尾换行会被自动 trim 掉。
+  # 不要在这里写 `Bearer ` 前缀 —— 那是隧道静态头的格式，中继这里只要裸值。
+  supabase_anon_key:
+    file: ./secrets/supabase-anon-key.txt
+  supabase_service_role_key:
+    file: ./secrets/supabase-service-role-key.txt
+  relay_admin_token:
+    file: ./secrets/relay-admin-token.txt
