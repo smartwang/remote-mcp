@@ -38,11 +38,17 @@ services:
       # —— 对外地址：这一条错了整个 OAuth 就废了 ——
       # 授权页、AS 元数据里的 issuer、PRM 里的 resource、device flow 的验证链接，
       # 全都由它拼绝对地址。必须是终端用户浏览器能直接打开的 HTTPS 地址。
-      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL:?RELAY_PUBLIC_URL 必填，例如 https://mcp.example.com}
+      #
+      # 这里刻意用 `:-` 而不是 `:?`：compose 的必填插值对**所有**子命令生效，
+      # 用 `:?` 会让配置没填全时连 `docker compose down/logs/ps` 都报错 ——
+      # 停都停不掉。所以"必须有值"交给 relay 自己判（见 config.js 的 validate：
+      # 留空会被算成 http://0.0.0.0:18086，relay 会拒绝启动并说明原因）。
+      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL:-}
 
       # —— Supabase（托管实例）——
-      SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL 必填，例如 https://xxxx.supabase.co}
-      PUBLIC_SUPABASE_URL: ${PUBLIC_SUPABASE_URL:?PUBLIC_SUPABASE_URL 必填 —— 下发给 device，必须 device 也访问得到}
+      # 同样交给 relay 自己判：ANON_KEY / SERVICE_ROLE_KEY 缺失时它列清单拒启。
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      PUBLIC_SUPABASE_URL: ${PUBLIC_SUPABASE_URL:-}
 
       # —— 安全姿态：服务器形态一律是紧的 ——
       # 注意这里没有 RELAY_REQUIRE_AUTH —— 那个开关 2026-09-18 已删除，

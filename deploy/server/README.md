@@ -86,6 +86,26 @@ printf '%s\n' '<service_role key>' > secrets/supabase-service-role-key.txt
 chmod 600 secrets/*.txt
 ```
 
+> ### ⚠️ 必须把属主改成容器用户，否则容器起不来
+>
+> compose 的 file 型 secret 是**按宿主文件的 uid/权限**绑定挂载进容器的，
+> 而中继镜像以非 root 的 `node`（**uid=1000**）运行。用 root 建的 `600` 文件，
+> 容器读不了，症状是反复重启 + 日志里：
+>
+> ```
+> <变量名>_FILE 指向的 /run/secrets/relay_admin_token 读取失败：EACCES: permission denied
+> ```
+>
+> ```bash
+> chown 1000:1000 secrets/*.txt
+> chmod 600 secrets/*.txt
+> ls -lan secrets/    # 期望看到 1000 1000
+> ```
+>
+> **这个坑在 Windows/Docker Desktop 上不会出现**（Windows 文件系统不套用这套
+> 权限语义），所以本机联调一切正常、一上 Linux 就全挂。用 `deploy/server/setup.sh`
+> 可以避免手抄。
+
 > ⚠️ `service_role` key 绕开 RLS。它进容器的唯一路径是 secret 文件，
 > 不以环境变量形式存在 —— 环境变量会出现在 `docker inspect` 的明文里。
 > 中继用 service_role 直连是**有意为之**（`supa.tenantScope()` 在代码层做隔离，

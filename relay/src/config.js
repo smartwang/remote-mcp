@@ -222,6 +222,20 @@ function validate() {
   if (!SERVICE_ROLE_KEY) {
     problems.push('SERVICE_ROLE_KEY 缺失（环境变量 / relay/.env / supabase/selfhosted/.env 三处都没有）');
   }
+  // RELAY_PUBLIC_URL 不能是 0.0.0.0。
+  //
+  // 容器的 RELAY_HOST 是 0.0.0.0，所以这一项留空时会被算成
+  // http://0.0.0.0:18086 —— 一个「看起来像地址、实际打不开」的值。
+  // 它会被写进 OAuth 的 issuer、AS 元数据、PRM 的 resource、授权页链接和
+  // device flow 的验证链接，症状是客户端**连得上**、授权却永远走不完，
+  // 且日志里没有任何指向性。宁可拒绝启动。
+  if (/0\.0\.0\.0/.test(RELAY_PUBLIC_URL)) {
+    problems.push(
+      `RELAY_PUBLIC_URL=${RELAY_PUBLIC_URL} 含 0.0.0.0 —— 这通常意味着它没被设置。` +
+        '请填终端用户浏览器能直接打开的 HTTPS 地址，例如 https://mcp.example.com'
+    );
+  }
+
   if (!fs.existsSync(CATALOG_PATH)) {
     problems.push(`工具目录不存在：${CATALOG_PATH}（先跑 node tools/gen-catalog.js）`);
   }
